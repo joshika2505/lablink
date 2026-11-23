@@ -1,24 +1,65 @@
 export type UserRole = 'student' | 'faculty' | 'admin';
 
+export type FacultyApprovalStatus = 'none' | 'pending' | 'approved' | 'rejected';
+
 export type EquipmentCategory =
+  | 'Electronics & Circuits'
+  | '3D Printing & Making'
   | 'Robotics'
-  | 'Electronics'
-  | 'Manufacturing'
-  | 'Research'
-  | 'Computing'
-  | 'Fabrication';
+  | 'Computers & Software'
+  | 'Testing & Measurement'
+  | 'Mechanical Workshop';
+
+export const EQUIPMENT_CATEGORIES: EquipmentCategory[] = [
+  'Electronics & Circuits',
+  '3D Printing & Making',
+  'Robotics',
+  'Computers & Software',
+  'Testing & Measurement',
+  'Mechanical Workshop',
+];
+
+export type ClayEquipmentTheme =
+  | 'arduino'
+  | 'esp32'
+  | 'oscilloscope'
+  | 'printer'
+  | 'laser'
+  | 'cnc'
+  | 'robot'
+  | 'mobile_robot'
+  | 'line_follower'
+  | 'pc'
+  | 'gpu'
+  | 'vr'
+  | 'multimeter'
+  | 'caliper'
+  | 'power_supply'
+  | 'lathe'
+  | 'mill'
+  | 'drill_press'
+  | 'microscope';
 
 export interface UserProfile {
   id: string;
   email: string;
   name: string;
   role: UserRole;
+  facultyApprovalStatus?: FacultyApprovalStatus;
   department: string;
   title: string;
   weeklyQuotaHours: number;
   usedHoursThisWeek: number;
   certifications: string[];
+  assignedLabIds?: string[];
   avatarUrl?: string;
+}
+
+export interface AuthorizedAdminEntry {
+  email: string;
+  name: string;
+  grantedBy: string;
+  createdAt: string;
 }
 
 export interface Department {
@@ -79,12 +120,14 @@ export interface Equipment {
   nextSlotLabel: string;
   lastCalibrated: string;
   totalBookings: number;
+  shortPurpose: string;
   description: string;
   specsPreview: string;
   specs: EquipmentSpec[];
   guidelines: EquipmentGuideline[];
   imageUrl: string;
-  clayTheme: 'microscope' | 'robot' | 'printer' | 'oscilloscope' | 'compute' | 'cnc' | 'xrd';
+  clayTheme: ClayEquipmentTheme;
+  isSampleData?: boolean;
 }
 
 export interface ResearchProject {
@@ -105,12 +148,53 @@ export interface ResearchProject {
   status: 'active' | 'pending_access' | 'completed';
 }
 
+export type AccessRequestStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'alternative_suggested';
+
+export interface AccessRequest {
+  id: string;
+  projectId: string;
+  projectTitle: string;
+  userId: string;
+  userName: string;
+  userDepartment: string;
+  equipmentId: string;
+  equipmentName: string;
+  requestedHours: number;
+  preferredDate: string;
+  deadline: string;
+  justification: string;
+  status: AccessRequestStatus;
+  suggestedAlternative?: {
+    date: string;
+    startHour: number;
+    durationHours: number;
+    equipmentId: string;
+    equipmentName: string;
+    reason: string;
+  };
+  facultyReviewerName?: string;
+  reviewerNotes?: string;
+  createdAt: string;
+}
+
 export type BookingStatus =
   | 'confirmed'
   | 'pending'
   | 'rejected'
   | 'cancelled'
   | 'alternative_suggested';
+
+export interface BusySlot {
+  equipmentId: string;
+  date: string;
+  startHour: number;
+  durationHours: number;
+  status: 'confirmed' | 'pending';
+}
 
 export interface Booking {
   id: string;
@@ -122,7 +206,7 @@ export interface Booking {
   projectId: string;
   projectTitle: string;
   date: string; // YYYY-MM-DD
-  startHour: number; // 8..20
+  startHour: number; // 7..21
   durationHours: number; // 1..8
   status: BookingStatus;
   totalCost: number;
@@ -140,12 +224,21 @@ export interface Booking {
   createdAt: string;
 }
 
+export interface AllocationFactorBreakdown {
+  deadlineScore: number; // max 28
+  fairnessScore: number; // max 22
+  compatibilityScore: number; // max 18
+  availabilityScore: number; // max 16
+  requirementScore: number; // max 16
+}
+
 export interface FairSlotCandidate {
   bookingId: string;
   studentId: string;
   studentName: string;
   studentInitials: string;
   studentTitle: string;
+  projectId?: string;
   projectTitle: string;
   deadlineDescription: string;
   hoursUntilDeadline: number;
@@ -155,6 +248,7 @@ export interface FairSlotCandidate {
   requestedStartHour: number;
   requestedDurationHours: number;
   recommended: boolean;
+  scoreBreakdown?: AllocationFactorBreakdown;
 }
 
 export interface FairSlotAlternative {
@@ -225,12 +319,41 @@ export interface AppNotification {
   createdAt: string;
 }
 
+export interface EquipmentUsageMetric {
+  equipmentId: string;
+  name: string;
+  category: string;
+  bookedHours: number;
+  idleHours: number;
+  bookingCount: number;
+  utilizationPercent: number;
+  demandTier: 'high' | 'normal' | 'low';
+}
+
 export interface UtilizationAnalytics {
   peakCapacityPercent: number;
   deltaVsLastWeek: string;
-  weeklyBars: Array<{ day: string; percent: number; isPeak?: boolean }>;
-  zoneSplit: Array<{ zone: string; percent: number; color: string }>;
+  weeklyBars: Array<{ day: string; percent: number; bookedHours?: number; isPeak?: boolean }>;
+  zoneSplit: Array<{ zone: string; percent: number; bookedHours?: number; color: string }>;
   onlineInstruments: number;
   totalInstruments: number;
   uptimePercent: number;
+  totalBookedHours?: number;
+  totalIdleHours?: number;
+  totalActiveBookings?: number;
+  peakHours?: Array<{ hourLabel: string; count: number }>;
+  equipmentUsage?: EquipmentUsageMetric[];
+  highDemandTools?: Array<{
+    name: string;
+    bookedHours: number;
+    bookingCount: number;
+    utilizationPercent: number;
+  }>;
+  lowDemandTools?: Array<{
+    name: string;
+    bookedHours: number;
+    bookingCount: number;
+    utilizationPercent: number;
+  }>;
+  recommendations?: string[];
 }

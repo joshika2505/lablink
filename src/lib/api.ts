@@ -1,6 +1,9 @@
 import type {
+  AccessRequest,
   AppNotification,
+  AuthorizedAdminEntry,
   Booking,
+  BusySlot,
   Department,
   Equipment,
   FairSlotConflictCase,
@@ -37,9 +40,15 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
     const err = new Error(data?.error || `Request failed (${res.status})`) as Error & {
       status?: number;
       conflictDetected?: boolean;
+      schemaError?: boolean;
+      suggestedAlternative?: Booking['suggestedAlternative'];
     };
     err.status = res.status;
     err.conflictDetected = Boolean(data?.conflictDetected);
+    err.schemaError = Boolean(data?.schemaError);
+    if (data?.suggestedAlternative) {
+      err.suggestedAlternative = data.suggestedAlternative;
+    }
     throw err;
   }
   return data as T;
@@ -51,36 +60,71 @@ export interface BootstrapPayload {
   laboratories: Laboratory[];
   equipment: Equipment[];
   projects: ResearchProject[];
+  accessRequests: AccessRequest[];
   bookings: Booking[];
+  busySlots: BusySlot[];
   conflicts: FairSlotConflictCase[];
   maintenance: MaintenanceLog[];
   notifications: AppNotification[];
-  analytics: UtilizationAnalytics;
+  analytics: UtilizationAnalytics | null;
   users: UserProfile[];
+  authorizedAdmins: AuthorizedAdminEntry[];
 }
 
 export const api = {
   health: () =>
-    request<{ ok: boolean; supabaseConfigured: boolean; geminiConfigured: boolean }>('/api/health'),
+    request<{
+      ok: boolean;
+      supabaseConfigured: boolean;
+      supabaseSchemaReady: boolean;
+      missingTables: string[];
+      geminiConfigured: boolean;
+    }>('/api/health'),
 
   bootstrap: () => request<BootstrapPayload>('/api/bootstrap'),
 
   login: (email: string, password: string) =>
-    request<{ user: UserProfile; token: string }>('/api/auth/login', {
+    request<{ user: UserProfile; token: string; refreshToken?: string }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }),
 
-  register: (payload: { email: string; name: string; password: string; department: string }) =>
-    request<{ user: UserProfile; token: string }>('/api/auth/register', {
+  register: (payload: {
+    email: string;
+    name: string;
+    password: string;
+    department: string;
+    requestFaculty?: boolean;
+  }) =>
+    request<{ user: UserProfile; token: string; refreshToken?: string }>('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
 
-  demoSession: (role: UserRole) =>
-    request<{ user: UserProfile; token: string }>('/api/auth/demo-session', {
+  updateProfile: (payload: { name?: string; department?: string; title?: string }) =>
+    request<{ user: UserProfile }>('/api/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
+  adminStatus: () =>
+    request<{
+      supabaseConfigured: boolean;
+      schemaReady: boolean;
+      claimRequired: boolean;
+      configuredAdminEmailHint?: string;
+    }>('/api/auth/admin-status'),
+
+  adminLogin: (email: string, password: string) =>
+    request<{ user: UserProfile; token: string; refreshToken?: string }>('/api/auth/admin-login', {
       method: 'POST',
-      body: JSON.stringify({ role }),
+      body: JSON.stringify({ email, password }),
+    }),
+
+  adminClaim: (email: string, name: string, password: string) =>
+    request<{ user: UserProfile; token: string }>('/api/auth/admin-claim', {
+      method: 'POST',
+      body: JSON.stringify({ email, name, password }),
     }),
 
   createBooking: (payload: {
@@ -140,6 +184,31 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  createAccessRequest: (payload: {
+    projectId: string;
+    equipmentId: string;
+    requestedHours: number;
+    preferredDate: string;
+    justification: string;
+  }) =>
+    request<{ accessRequest: AccessRequest }>('/api/access-requests', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  decideAccessRequest: (
+    id: string,
+    payload: {
+      decision: 'approved' | 'rejected' | 'alternative_suggested';
+      reviewerNotes?: string;
+      alternative?: AccessRequest['suggestedAlternative'];
+    },
+  ) =>
+    request<{ accessRequest: AccessRequest }>(`/api/access-requests/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
   addEquipment: (payload: {
     code?: string;
     name: string;
@@ -155,6 +224,31 @@ export const api = {
     request<{ equipment: Equipment }>('/api/equipment', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  updateEquipment: (
+    id: string,
+    payload: Partial<{
+      name: string;
+      category: string;
+      departmentId: string;
+      laboratoryId: string;
+      hourlyRate: number;
+      requiresFacultyApproval: boolean;
+      certificationRequired: string;
+      description: string;
+      specsPreview: string;
+      status: Equipment['status'];
+    }>,
+  ) =>
+    request<{ equipment: Equipment }>(`/api/equipment/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteEquipment: (id: string) =>
+    request<{ ok: boolean; deletedId: string }>(`/api/equipment/${id}`, {
+      method: 'DELETE',
     }),
 
   updateEquipmentStatus: (id: string, status: Equipment['status']) =>
@@ -187,6 +281,39 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ role }),
     }),
+
+  createFacultyAccount: (payload: {
+    email: string;
+    name: string;
+    department: string;
+    password: string;
+    assignedLabIds?: string[];
+  }) =>
+    request<{ user: UserProfile }>('/api/admin/faculty', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  decideFacultyRequest: (
+    userId: string,
+    payload: { decision: 'approved' | 'rejected'; assignedLabIds?: string[] },
+  ) =>
+    request<{ user: UserProfile }>(`/api/admin/faculty-requests/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
+  grantAuthorizedAdmin: (email: string, name: string) =>
+    request<{ authorizedAdmins: AuthorizedAdminEntry[] }>('/api/admin/authorized-admins', {
+      method: 'POST',
+      body: JSON.stringify({ email, name }),
+    }),
+
+  revokeAuthorizedAdmin: (email: string) =>
+    request<{ authorizedAdmins: AuthorizedAdminEntry[] }>(
+      `/api/admin/authorized-admins/${encodeURIComponent(email)}`,
+      { method: 'DELETE' },
+    ),
 
   addMaintenance: (payload: {
     equipmentId: string;
@@ -247,13 +374,17 @@ export const api = {
       method: 'POST',
     }),
 
-  aiAssistant: (prompt: string) =>
+  aiAssistant: (
+    message: string,
+    history?: Array<{ role: 'user' | 'assistant'; text: string }>,
+  ) =>
     request<{
       answer: string;
       suggestedEquipmentIds: string[];
       safetyNote: string;
+      suggestedRoute?: string;
     }>('/api/ai/assistant', {
       method: 'POST',
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ message, history }),
     }),
 };

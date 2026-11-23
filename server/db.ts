@@ -1,9 +1,13 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type {
+  AccessRequest,
+  AccessRequestStatus,
   AppNotification,
   Booking,
+  BusySlot,
   Department,
   Equipment,
   FairSlotConflictCase,
@@ -14,24 +18,35 @@ import type {
   UserRole,
   UtilizationAnalytics,
 } from '../src/types/lablink.js';
-import { hashPassword } from './auth.js';
+import { buildDeterministicConflictCase, findRealAlternativeSlots } from './allocation.js';
+import { computeRealUtilizationAnalytics } from './analytics.js';
+import { hashPassword, verifyPassword } from './auth.js';
 
 export interface StoredUser extends UserProfile {
   passwordHash: string;
 }
 
 export interface LabLinkDatabase {
+  catalogVersion?: number;
   users: StoredUser[];
+  authorizedAdmins: Array<{
+    email: string;
+    name: string;
+    grantedBy: string;
+    createdAt: string;
+  }>;
   departments: Department[];
   laboratories: Laboratory[];
   equipment: Equipment[];
   projects: ResearchProject[];
+  accessRequests: AccessRequest[];
   bookings: Booking[];
   conflicts: FairSlotConflictCase[];
   maintenance: MaintenanceLog[];
   notifications: AppNotification[];
 }
 
+const CURRENT_CATALOG_VERSION = 2;
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const DATA_FILE = path.join(DATA_DIR, 'lablink-db.json');
 
@@ -64,7 +79,7 @@ function createInitialSeed(): LabLinkDatabase {
       title: 'Graduate Researcher • Bioengineering',
       weeklyQuotaHours: 6,
       usedHoursThisWeek: 2.5,
-      certifications: ['General Lab Safety', 'Level 2 Confocal', 'Biosafety Level 1'],
+      certifications: ['General Lab Safety', '3D Printer & Laser Intro', 'Robotics Lab Safety'],
       passwordHash: defaultPassHash,
     },
     {
@@ -76,7 +91,7 @@ function createInitialSeed(): LabLinkDatabase {
       title: 'PhD Candidate • Materials Science',
       weeklyQuotaHours: 6,
       usedHoursThisWeek: 2.0,
-      certifications: ['General Lab Safety', 'Level 2 Confocal', 'XRD Radiation Safety'],
+      certifications: ['General Lab Safety', 'CNC Machine Safety', 'Laser Cutter Certified'],
       passwordHash: defaultPassHash,
     },
     {
@@ -96,495 +111,853 @@ function createInitialSeed(): LabLinkDatabase {
       email: 'elena.rostova@lablink.edu',
       name: 'Dr. Elena Rostova',
       role: 'faculty',
-      department: 'Bioengineering',
-      title: 'Lead Imaging Specialist & Faculty PI',
+      department: 'Electronics & Robotics',
+      title: 'Faculty Lead • Robotics & Circuits',
       weeklyQuotaHours: 20,
       usedHoursThisWeek: 4.0,
-      certifications: ['General Lab Safety', 'Level 2 Confocal', 'Cryo-EM Level 3', 'Faculty Approver'],
+      certifications: ['General Lab Safety', 'Workshop Green Tag', 'Laser Safety', 'Faculty Approver'],
+      assignedLabIds: ['lab-electronics', 'lab-robotics', 'lab-testing'],
       passwordHash: defaultPassHash,
     },
     {
       id: 'usr-admin',
-      email: 'marcus.chen@lablink.edu',
+      email: (process.env.ADMIN_EMAIL || 'admin@lablink.edu').trim().toLowerCase(),
       name: 'Marcus Chen',
       role: 'admin',
       department: 'Campus Lab Operations',
-      title: 'Director of Laboratory Operations',
+      title: 'Platform Administrator',
       weeklyQuotaHours: 40,
       usedHoursThisWeek: 1.0,
       certifications: ['System Administrator', 'Safety Officer', 'Calibration Lead'],
-      passwordHash: defaultPassHash,
+      passwordHash: '',
+    },
+  ];
+
+  const authorizedAdmins = [
+    {
+      email: (process.env.ADMIN_EMAIL || 'admin@lablink.edu').trim().toLowerCase(),
+      name: 'Marcus Chen',
+      grantedBy: 'System Setup',
+      createdAt: new Date().toISOString(),
     },
   ];
 
   const departments: Department[] = [
     {
-      id: 'dept-bio',
-      name: 'Bioengineering',
-      code: 'BIOE',
-      headName: 'Dr. Elena Rostova',
-      instrumentCount: 34,
-      uptimePercent: 98.2,
-      accentColor: 'mint',
-      icon: 'genetics',
-    },
-    {
-      id: 'dept-rob',
-      name: 'Robotics & ECE',
-      code: 'ROBO',
-      headName: 'Prof. Arjun Patel',
-      instrumentCount: 42,
-      uptimePercent: 98.9,
-      accentColor: 'blue',
+      id: 'dept-ece',
+      name: 'Electrical & Circuits',
+      code: 'ECE',
+      headName: 'Dr. Kevin Wu',
+      instrumentCount: 6,
+      uptimePercent: 99.1,
+      accentColor: 'pink',
       icon: 'memory',
     },
     {
-      id: 'dept-mat',
-      name: 'Materials & Chem',
-      code: 'MATS',
-      headName: 'Dr. Sarah Jenkins',
-      instrumentCount: 29,
-      uptimePercent: 95.4,
-      accentColor: 'pink',
-      icon: 'experiment',
+      id: 'dept-rob',
+      name: 'Robotics & Automation',
+      code: 'ROBO',
+      headName: 'Prof. Arjun Patel',
+      instrumentCount: 3,
+      uptimePercent: 98.7,
+      accentColor: 'blue',
+      icon: 'precision_manufacturing',
     },
     {
       id: 'dept-fab',
-      name: 'Rapid Prototyping',
-      code: 'FABR',
+      name: 'Making & Workshop',
+      code: 'MAKE',
       headName: 'Prof. Lucas Meyer',
-      instrumentCount: 35,
-      uptimePercent: 99.1,
+      instrumentCount: 6,
+      uptimePercent: 97.9,
+      accentColor: 'mint',
+      icon: 'layers',
+    },
+    {
+      id: 'dept-cs',
+      name: 'Computing & VR',
+      code: 'COMP',
+      headName: 'Dr. Elena Rostova',
+      instrumentCount: 3,
+      uptimePercent: 99.4,
       accentColor: 'butter',
-      icon: 'view_in_ar',
+      icon: 'computer',
     },
   ];
 
   const laboratories: Laboratory[] = [
     {
-      id: 'lab-imaging',
-      name: 'Bio-Imaging Core Suite',
-      departmentId: 'dept-bio',
-      departmentName: 'Bioengineering',
-      building: 'Stata Center, Bldg 32',
-      room: '32-241B',
-      accessLevel: 'Keycard Access • 24/7 Certified',
-      capacity: 8,
-      occupied: 6,
+      id: 'lab-electronics',
+      name: 'Electronics & Circuits Lab (Sample)',
+      departmentId: 'dept-ece',
+      departmentName: 'Electrical & Circuits',
+      building: 'Sample Building A',
+      room: 'Room 104',
+      accessLevel: 'Open Student Access',
+      capacity: 14,
+      occupied: 7,
       status: 'open',
-      managerName: 'Dr. Elena Rostova',
-      managerTitle: 'Lead Imaging Specialist • Training Required',
-      coordinates: { lat: 42.3616, lng: -71.0906, xPercent: 28, yPercent: 34 },
+      managerName: 'Dr. Kevin Wu',
+      managerTitle: 'Electronics Lab Advisor',
+      coordinates: { lat: 42.3616, lng: -71.0906, xPercent: 26, yPercent: 32 },
+    },
+    {
+      id: 'lab-making',
+      name: '3D Printing & Making Hub (Sample)',
+      departmentId: 'dept-fab',
+      departmentName: 'Making & Workshop',
+      building: 'Sample Maker Hall',
+      room: 'Room 08',
+      accessLevel: 'Safety Briefing Required',
+      capacity: 12,
+      occupied: 9,
+      status: 'high_load',
+      managerName: 'Prof. Lucas Meyer',
+      managerTitle: 'Maker Lab Coordinator',
+      coordinates: { lat: 42.3588, lng: -71.0935, xPercent: 46, yPercent: 64 },
     },
     {
       id: 'lab-robotics',
-      name: 'Robotics Studio B',
+      name: 'Robotics Studio (Sample)',
       departmentId: 'dept-rob',
-      departmentName: 'Robotics & ECE',
-      building: 'Mechatronics Hall',
-      room: 'Rm 204',
-      accessLevel: 'Badge Access • Safety Briefing',
+      departmentName: 'Robotics & Automation',
+      building: 'Sample Robotics Wing',
+      room: 'Room 204',
+      accessLevel: 'Badge Access',
       capacity: 10,
       occupied: 5,
       status: 'open',
       managerName: 'Prof. Arjun Patel',
-      managerTitle: 'Mechatronics Lab Director',
-      coordinates: { lat: 42.3602, lng: -71.0921, xPercent: 54, yPercent: 26 },
+      managerTitle: 'Robotics Studio Lead',
+      coordinates: { lat: 42.3602, lng: -71.0921, xPercent: 56, yPercent: 25 },
     },
     {
-      id: 'lab-circuits',
-      name: 'Circuits & Signal Lab',
-      departmentId: 'dept-rob',
-      departmentName: 'Robotics & ECE',
-      building: 'EE Pavilion',
-      room: 'Rm 112',
-      accessLevel: 'Open Lab Access',
-      capacity: 14,
-      occupied: 8,
+      id: 'lab-computing',
+      name: 'Computers & VR Studio (Sample)',
+      departmentId: 'dept-cs',
+      departmentName: 'Computing & VR',
+      building: 'Sample Tech Center',
+      room: 'Room 302',
+      accessLevel: 'Open Student Access',
+      capacity: 16,
+      occupied: 6,
       status: 'open',
-      managerName: 'Dr. Kevin Wu',
-      managerTitle: 'Signal Integrity Lead',
-      coordinates: { lat: 42.3595, lng: -71.089, xPercent: 72, yPercent: 45 },
+      managerName: 'Dr. Elena Rostova',
+      managerTitle: 'Computing Lab Lead',
+      coordinates: { lat: 42.3595, lng: -71.089, xPercent: 76, yPercent: 44 },
     },
     {
-      id: 'lab-proto',
-      name: 'Rapid Prototyping Hub',
-      departmentId: 'dept-fab',
-      departmentName: 'Rapid Prototyping',
-      building: 'Design Foundry',
-      room: 'Rm 08',
-      accessLevel: 'Keycard Access • Resin Ventilation',
-      capacity: 12,
-      occupied: 10,
-      status: 'high_load',
-      managerName: 'Prof. Lucas Meyer',
-      managerTitle: 'Fabrication Lead',
-      coordinates: { lat: 42.3588, lng: -71.0935, xPercent: 40, yPercent: 68 },
-    },
-    {
-      id: 'lab-xrd',
-      name: 'Materials Diffraction Bay',
-      departmentId: 'dept-mat',
-      departmentName: 'Materials & Chem',
-      building: 'NanoTech Annex',
-      room: 'Bay 04',
-      accessLevel: 'Level 2 Radiation Safety',
-      capacity: 6,
+      id: 'lab-testing',
+      name: 'Testing & Measurement Bench (Sample)',
+      departmentId: 'dept-ece',
+      departmentName: 'Electrical & Circuits',
+      building: 'Sample Building A',
+      room: 'Room 112',
+      accessLevel: 'General Lab Safety',
+      capacity: 10,
       occupied: 4,
       status: 'open',
-      managerName: 'Dr. Sarah Jenkins',
-      managerTitle: 'X-Ray Crystallography Lead',
-      coordinates: { lat: 42.3621, lng: -71.0875, xPercent: 66, yPercent: 74 },
+      managerName: 'Dr. Kevin Wu',
+      managerTitle: 'Testing Bench Coordinator',
+      coordinates: { lat: 42.3621, lng: -71.0875, xPercent: 72, yPercent: 74 },
     },
     {
-      id: 'lab-cryo',
-      name: 'Cryo-EM Facility C08',
-      departmentId: 'dept-mat',
-      departmentName: 'Materials & Chem',
-      building: 'NanoTech Annex',
-      room: 'C08',
-      accessLevel: 'Restricted Level 3 Access',
-      capacity: 4,
-      occupied: 1,
+      id: 'lab-workshop',
+      name: 'Mechanical Workshop (Sample)',
+      departmentId: 'dept-fab',
+      departmentName: 'Making & Workshop',
+      building: 'Sample Foundry',
+      room: 'Bay 03',
+      accessLevel: 'Workshop Safety Training',
+      capacity: 8,
+      occupied: 3,
       status: 'calibrating',
-      managerName: 'Dr. Elena Rostova',
-      managerTitle: 'Cryo-EM Operations',
-      coordinates: { lat: 42.3629, lng: -71.0882, xPercent: 20, yPercent: 72 },
+      managerName: 'Prof. Lucas Meyer',
+      managerTitle: 'Workshop Supervisor',
+      coordinates: { lat: 42.3629, lng: -71.0882, xPercent: 22, yPercent: 72 },
     },
   ];
 
   const equipment: Equipment[] = [
+    // CATEGORY 1 — ELECTRONICS & CIRCUITS
     {
-      id: 'eq-zeiss-lsm980',
-      code: 'EQ-4092-OPT',
-      name: 'Zeiss LSM 980 Confocal Microscope',
-      category: 'Research',
-      departmentId: 'dept-bio',
-      departmentName: 'Bioengineering',
-      laboratoryId: 'lab-imaging',
-      locationLabel: 'Bio-Imaging Core, Room 32-241B',
+      id: 'eq-arduino-kit',
+      code: 'EC-101',
+      name: 'Arduino Starter Kit',
+      category: 'Electronics & Circuits',
+      departmentId: 'dept-ece',
+      departmentName: 'Electrical & Circuits',
+      laboratoryId: 'lab-electronics',
+      locationLabel: 'Sample Lab · Electronics Lab, Room 104',
       status: 'available',
-      hourlyRate: 45,
-      requiresFacultyApproval: true,
-      certificationRequired: 'Level 2 Confocal',
-      biosafetyLevel: 'Biosafety Level 1',
-      nextSlotLabel: 'Today, 2:00 PM',
-      lastCalibrated: 'Oct 12',
-      totalBookings: 482,
-      description:
-        'High-sensitivity spectral confocal imaging system equipped with Airyscan 2 for multiplexed, super-resolution live-cell and fixed-tissue 3D imaging.',
-      specsPreview: '405–639 nm Lasers • 120 nm Airyscan 2 • 37°C CO₂ Stage',
-      imageUrl: '',
-      clayTheme: 'microscope',
-      specs: [
-        { label: 'Laser Lines', value: '405, 488, 561, 639 nm', icon: 'flare', tone: 'mint' },
-        { label: 'Resolution', value: '120 nm (Airyscan 2)', icon: 'center_focus_strong', tone: 'blue' },
-        { label: 'Detectors', value: '34-Ch GaAsP Spectral', icon: 'camera', tone: 'pink' },
-        { label: 'Objectives', value: '10x, 20x, 40x, 63x Oil', icon: 'zoom_in', tone: 'neutral' },
-        { label: 'Incubation', value: '37°C + 5% CO₂ Stage', icon: 'thermostat', tone: 'mint' },
-        { label: 'Workstation', value: 'ZEN Blue 3.8 + 128GB', icon: 'memory', tone: 'blue' },
-      ],
-      guidelines: [
-        {
-          title: 'Level 2 Certification',
-          detail: 'First-time users must complete a 90-minute hands-on orientation with Dr. Rostova.',
-          icon: 'school',
-        },
-        {
-          title: 'Objective Cleaning',
-          detail: 'Always wipe immersion oil from 63x objectives using lens paper and Sparkle cleaner.',
-          icon: 'cleaning_services',
-        },
-        {
-          title: 'Laser Warm-up',
-          detail: 'Allow 15 minutes for Argon/Diode lasers to stabilize before quantitative imaging.',
-          icon: 'power_settings_new',
-        },
-        {
-          title: 'Data Offloading',
-          detail: 'Transfer .czi files to LabLink Cloud or external SSD immediately; local drive purges weekly.',
-          icon: 'cloud_upload',
-        },
-      ],
-    },
-    {
-      id: 'eq-ur5e-arm',
-      code: 'EQ-1084-ROB',
-      name: 'UR5e Collaborative Robot Arm',
-      category: 'Robotics',
-      departmentId: 'dept-rob',
-      departmentName: 'Mechanical Engineering',
-      laboratoryId: 'lab-robotics',
-      locationLabel: 'Robotics Studio B, Room 204',
-      status: 'available',
-      hourlyRate: 30,
+      hourlyRate: 5,
       requiresFacultyApproval: false,
       certificationRequired: 'General Lab Safety',
-      biosafetyLevel: 'ISO/TS 15066 Cobot',
-      nextSlotLabel: 'Today, 2:00 PM',
-      lastCalibrated: 'Oct 18',
-      totalBookings: 319,
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 1:00 PM',
+      lastCalibrated: 'Nov 10',
+      totalBookings: 420,
+      shortPurpose: 'Build quick circuits, sensor prototypes, and LED or motor projects.',
       description:
-        'Six-axis collaborative robotic arm with integrated force-torque sensing, ROS 2 real-time control interface, and adaptive parallel gripper.',
-      specsPreview: '6-Axis • 5kg Payload • ±0.03mm Repeatability',
+        'Complete Arduino Uno starter box with breadboard, jumper wires, sensors, servos, and USB cable for class projects and prototypes.',
+      specsPreview: 'Arduino Uno R3 • Breadboard • 20+ Sensors & Motors',
       imageUrl: '',
-      clayTheme: 'robot',
+      clayTheme: 'arduino',
+      isSampleData: true,
       specs: [
-        { label: 'Axes & Reach', value: '6-Axis • 850 mm Reach', icon: 'precision_manufacturing', tone: 'blue' },
-        { label: 'Payload', value: '5.0 kg Rated', icon: 'fitness_center', tone: 'mint' },
-        { label: 'Repeatability', value: '±0.03 mm Precision', icon: 'straighten', tone: 'pink' },
-        { label: 'SDK Control', value: 'ROS 2 Humble / Python', icon: 'terminal', tone: 'neutral' },
-        { label: 'Force Sensor', value: '6-DOF Wrist F/T', icon: 'sensors', tone: 'mint' },
-        { label: 'Safety Zone', value: 'LiDAR Perimeter Guard', icon: 'shield', tone: 'blue' },
+        { label: 'Board', value: 'Arduino Uno R3 (5V)', icon: 'memory', tone: 'mint' },
+        { label: 'Included Parts', value: 'Sensors, LEDs, Servos', icon: 'extension', tone: 'blue' },
+        { label: 'Software', value: 'Arduino IDE (USB)', icon: 'code', tone: 'pink' },
       ],
       guidelines: [
         {
-          title: 'E-Stop Reach Check',
-          detail: 'Verify physical emergency stop pendant sits within arm reach before powering joints.',
-          icon: 'verified_user',
+          title: 'Check Polarity',
+          detail: 'Double-check 5V and GND wires before plugging in the USB cable.',
+          icon: 'bolt',
         },
         {
-          title: 'Torque Limits',
-          detail: 'Keep collaborative speed below 250 mm/s during unguarded benchtop testing.',
-          icon: 'speed',
+          title: 'Pack All Parts',
+          detail: 'Place resistors, jumpers, and boards back into the organizer tray after use.',
+          icon: 'inventory_2',
         },
       ],
     },
     {
-      id: 'eq-keysight-scope',
-      code: 'EQ-2219-ELC',
-      name: 'Keysight MSOX3024T Oscilloscope',
-      category: 'Electronics',
-      departmentId: 'dept-rob',
-      departmentName: 'Electrical Engineering',
-      laboratoryId: 'lab-circuits',
-      locationLabel: 'Circuits & Signal Lab, Room 112',
+      id: 'eq-esp32-board',
+      code: 'EC-102',
+      name: 'ESP32 Board',
+      category: 'Electronics & Circuits',
+      departmentId: 'dept-ece',
+      departmentName: 'Electrical & Circuits',
+      laboratoryId: 'lab-electronics',
+      locationLabel: 'Sample Lab · Electronics Lab, Room 104',
+      status: 'available',
+      hourlyRate: 5,
+      requiresFacultyApproval: false,
+      certificationRequired: 'General Lab Safety',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 2:00 PM',
+      lastCalibrated: 'Nov 12',
+      totalBookings: 318,
+      shortPurpose: 'Create wireless Wi-Fi and Bluetooth IoT projects with fast microcontrollers.',
+      description:
+        'Dual-core Wi-Fi & Bluetooth microcontroller dev board mounted on an easy-access breakout with USB-C.',
+      specsPreview: 'Wi-Fi + Bluetooth • Dual Core • 3.3V Logic',
+      imageUrl: '',
+      clayTheme: 'esp32',
+      isSampleData: true,
+      specs: [
+        { label: 'Wireless', value: 'Wi-Fi & Bluetooth LE', icon: 'wifi', tone: 'blue' },
+        { label: 'Voltage', value: '3.3V GPIO Pins', icon: 'bolt', tone: 'mint' },
+        { label: 'Connection', value: 'USB-C Programming', icon: 'cable', tone: 'pink' },
+      ],
+      guidelines: [
+        {
+          title: '3.3V Pin Limit',
+          detail: 'Never connect 5V sensors directly to ESP32 signal pins without a level shifter.',
+          icon: 'warning',
+        },
+      ],
+    },
+    {
+      id: 'eq-digital-oscilloscope',
+      code: 'EC-103',
+      name: 'Digital Oscilloscope',
+      category: 'Electronics & Circuits',
+      departmentId: 'dept-ece',
+      departmentName: 'Electrical & Circuits',
+      laboratoryId: 'lab-electronics',
+      locationLabel: 'Sample Lab · Electronics Lab, Room 104',
       status: 'available',
       hourlyRate: 15,
       requiresFacultyApproval: false,
       certificationRequired: 'General Lab Safety',
-      biosafetyLevel: 'ESD Safe Bench',
+      biosafetyLevel: 'Sample Lab Data',
       nextSlotLabel: 'Today, 1:30 PM',
-      lastCalibrated: 'Oct 08',
-      totalBookings: 614,
+      lastCalibrated: 'Nov 08',
+      totalBookings: 512,
+      shortPurpose: 'See voltage signals, waves, and circuit timing live on a color screen.',
       description:
-        'Mixed-signal benchtop oscilloscope with capacitive touch screen, built-in 20 MHz function generator, and protocol decoding for I2C, SPI, CAN.',
-      specsPreview: '200 MHz • 4 Analog + 16 Digital • 5 GSa/s',
+        '4-channel benchtop digital oscilloscope for debugging Arduino/ESP32 signals, audio circuits, and sensor pulses.',
+      specsPreview: '100 MHz • 4 Analog Channels • Built-in Signal Check',
       imageUrl: '',
       clayTheme: 'oscilloscope',
+      isSampleData: true,
       specs: [
-        { label: 'Bandwidth', value: '200 MHz', icon: 'waves', tone: 'pink' },
-        { label: 'Channels', value: '4 Analog + 16 Digital', icon: 'cable', tone: 'blue' },
-        { label: 'Sample Rate', value: '5 GSa/s Real-Time', icon: 'bolt', tone: 'mint' },
-        { label: 'Memory Depth', value: '4 Mpts', icon: 'memory', tone: 'neutral' },
-        { label: 'WaveGen', value: '20 MHz Built-in', icon: 'graphic_eq', tone: 'mint' },
-        { label: 'Probes', value: '4x 500MHz Passive', icon: 'settings_input_component', tone: 'blue' },
+        { label: 'Channels', value: '4 Analog Inputs', icon: 'waves', tone: 'pink' },
+        { label: 'Bandwidth', value: '100 MHz', icon: 'speed', tone: 'blue' },
+        { label: 'Probes', value: '4× 10x Passive Probes', icon: 'cable', tone: 'mint' },
       ],
       guidelines: [
         {
-          title: 'ESD Grounding',
-          detail: 'Use wrist strap on anti-static mat when probing bare CMOS boards.',
+          title: 'Ground Clip Safety',
+          detail: 'Connect probe ground clips only to circuit ground to avoid short circuits.',
           icon: 'electric_bolt',
-        },
-        {
-          title: 'Probe Compensation',
-          detail: 'Verify 1kHz square wave calibration before differential high-speed measurements.',
-          icon: 'tune',
         },
       ],
     },
+
+    // CATEGORY 2 — 3D PRINTING & MAKING
     {
-      id: 'eq-formlabs-3l',
-      code: 'EQ-3305-FAB',
-      name: 'Formlabs Form 3L SLA Printer',
-      category: 'Fabrication',
+      id: 'eq-3d-printer',
+      code: 'MK-201',
+      name: '3D Printer',
+      category: '3D Printing & Making',
       departmentId: 'dept-fab',
-      departmentName: 'Industrial Design',
-      laboratoryId: 'lab-proto',
-      locationLabel: 'Rapid Prototyping Hub, Room 08',
-      status: 'in_use',
-      hourlyRate: 25,
+      departmentName: 'Making & Workshop',
+      laboratoryId: 'lab-making',
+      locationLabel: 'Sample Lab · 3D Printing Hub, Room 08',
+      status: 'available',
+      hourlyRate: 12,
       requiresFacultyApproval: false,
       certificationRequired: 'General Lab Safety',
-      biosafetyLevel: 'Resin PPE Required',
-      nextSlotLabel: 'Tomorrow, 9:00 AM',
-      lastCalibrated: 'Oct 15',
-      totalBookings: 274,
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 3:00 PM',
+      lastCalibrated: 'Nov 14',
+      totalBookings: 685,
+      shortPurpose: 'Print custom plastic parts, robot brackets, and project cases from CAD files.',
       description:
-        'Large-format Low Force Stereolithography resin printer powered by twin Light Processing Units for smooth micro-featured prototypes.',
-      specsPreview: '33.5 × 20 × 30 cm • 25μm Layer • Dual Laser',
+        'Fast auto-leveling desktop 3D printer supporting PLA and PETG filaments for rapid student prototypes.',
+      specsPreview: '250 × 210 × 210 mm • PLA & PETG • Auto Bed Level',
       imageUrl: '',
       clayTheme: 'printer',
+      isSampleData: true,
       specs: [
-        { label: 'Build Volume', value: '33.5 × 20 × 30 cm', icon: 'view_in_ar', tone: 'mint' },
-        { label: 'Layer Resolution', value: '25–100 μm Z-Axis', icon: 'layers', tone: 'blue' },
-        { label: 'Optics', value: 'Dual 250mW LPU', icon: 'flare', tone: 'pink' },
-        { label: 'Materials', value: 'BioMed, Tough 2000, Clear', icon: 'science', tone: 'neutral' },
-        { label: 'Post-Cure', value: 'Form Wash L + Cure L', icon: 'wb_sunny', tone: 'mint' },
-        { label: 'File Format', value: '.STL / .OBJ via PreForm', icon: 'folder_open', tone: 'blue' },
+        { label: 'Print Size', value: '250 × 210 × 210 mm', icon: 'view_in_ar', tone: 'mint' },
+        { label: 'Materials', value: 'PLA, PETG', icon: 'layers', tone: 'blue' },
+        { label: 'File Type', value: '.STL / .3MF', icon: 'folder_open', tone: 'pink' },
       ],
       guidelines: [
         {
-          title: 'Nitrile Gloves',
-          detail: 'Wear double nitrile gloves when transferring uncured parts into IPA wash station.',
-          icon: 'pan_tool',
-        },
-        {
-          title: 'Resin Tank Check',
-          detail: 'Inspect PDMS tank film for cured debris with soft silicone spatula before printing.',
+          title: 'Watch First Layer',
+          detail: 'Stay for the first 5 minutes of your print to confirm the first layer sticks cleanly.',
           icon: 'visibility',
         },
       ],
     },
     {
-      id: 'eq-dgx-a100',
-      code: 'EQ-5501-CMP',
-      name: 'NVIDIA DGX A100 AI Node',
-      category: 'Computing',
-      departmentId: 'dept-rob',
-      departmentName: 'Computer Science',
-      laboratoryId: 'lab-circuits',
-      locationLabel: 'AI Compute Cluster, Room 402',
-      status: 'available',
-      hourlyRate: 40,
+      id: 'eq-laser-cutter',
+      code: 'MK-202',
+      name: 'Laser Cutter',
+      category: '3D Printing & Making',
+      departmentId: 'dept-fab',
+      departmentName: 'Making & Workshop',
+      laboratoryId: 'lab-making',
+      locationLabel: 'Sample Lab · 3D Printing Hub, Room 08',
+      status: 'in_use',
+      hourlyRate: 20,
       requiresFacultyApproval: true,
-      certificationRequired: 'Cluster SSH Key',
-      biosafetyLevel: 'Remote SSH / Slurm',
-      nextSlotLabel: 'Now (Remote SSH)',
-      lastCalibrated: 'Oct 20',
-      totalBookings: 842,
+      certificationRequired: 'Laser Safety Briefing',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Tomorrow, 10:00 AM',
+      lastCalibrated: 'Nov 11',
+      totalBookings: 340,
+      shortPurpose: 'Cut and engrave clean shapes into wood, acrylic sheets, and cardboard.',
       description:
-        'Dedicated 8-GPU Tensor Core node for molecular dynamics, foundation model fine-tuning, and real-time 3D tomography reconstruction.',
-      specsPreview: '8× A100 80GB • 640GB VRAM • 5 PFLOPS AI',
+        'Enclosed CO2 laser cutter with exhaust fan for fast, accurate panels, robot chassis plates, and engravings.',
+      specsPreview: '600 × 400 mm Bed • Wood & Acrylic • Exhaust Filtered',
       imageUrl: '',
-      clayTheme: 'compute',
+      clayTheme: 'laser',
+      isSampleData: true,
       specs: [
-        { label: 'GPUs', value: '8× NVIDIA A100 80GB', icon: 'developer_board', tone: 'pink' },
-        { label: 'Total VRAM', value: '640 GB HBM2e', icon: 'memory', tone: 'blue' },
-        { label: 'AI Compute', value: '5 PFLOPS FP16', icon: 'speed', tone: 'mint' },
-        { label: 'Interconnect', value: 'NVSwitch 600 GB/s', icon: 'hub', tone: 'neutral' },
-        { label: 'Storage', value: '30 TB NVMe Scratch', icon: 'storage', tone: 'mint' },
-        { label: 'Scheduler', value: 'Slurm + JupyterHub', icon: 'terminal', tone: 'blue' },
+        { label: 'Bed Area', value: '600 × 400 mm', icon: 'crop_free', tone: 'pink' },
+        { label: 'Materials', value: 'Plywood, Acrylic, Paper', icon: 'layers', tone: 'mint' },
+        { label: 'Design Files', value: '.SVG / .DXF', icon: 'draw', tone: 'blue' },
       ],
       guidelines: [
         {
-          title: 'Checkpoint Policy',
-          detail: 'Save model weights every 30 minutes to shared NFS; scratch storage purges after 14 days.',
+          title: 'Approved Materials Only',
+          detail: 'Never cut PVC or vinyl. Stay beside the machine at all times while cutting.',
+          icon: 'verified_user',
+        },
+      ],
+    },
+    {
+      id: 'eq-cnc-machine',
+      code: 'MK-203',
+      name: 'CNC Machine',
+      category: '3D Printing & Making',
+      departmentId: 'dept-fab',
+      departmentName: 'Making & Workshop',
+      laboratoryId: 'lab-making',
+      locationLabel: 'Sample Lab · 3D Printing Hub, Room 08',
+      status: 'available',
+      hourlyRate: 30,
+      requiresFacultyApproval: true,
+      certificationRequired: 'CNC Safety Check',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 4:00 PM',
+      lastCalibrated: 'Nov 09',
+      totalBookings: 210,
+      shortPurpose: 'Carve solid aluminum, wood, or PCB boards using computer-guided cutting tools.',
+      description:
+        '3-axis desktop & shop CNC router for accurate mechanical brackets, enclosures, and milled parts.',
+      specsPreview: '3-Axis Router • Aluminum & Wood • Enclosed Guard',
+      imageUrl: '',
+      clayTheme: 'cnc',
+      isSampleData: true,
+      specs: [
+        { label: 'Work Area', value: '400 × 300 × 120 mm', icon: 'open_with', tone: 'mint' },
+        { label: 'Spindle', value: '12,000 RPM', icon: 'cyclone', tone: 'blue' },
+        { label: 'Safety', value: 'Full Door Interlock', icon: 'shield', tone: 'pink' },
+      ],
+      guidelines: [
+        {
+          title: 'Dry Run First',
+          detail: 'Check tool height and run an air pass before cutting solid stock.',
+          icon: 'fact_check',
+        },
+      ],
+    },
+
+    // CATEGORY 3 — ROBOTICS
+    {
+      id: 'eq-robotic-arm',
+      code: 'RB-301',
+      name: 'Robotic Arm',
+      category: 'Robotics',
+      departmentId: 'dept-rob',
+      departmentName: 'Robotics & Automation',
+      laboratoryId: 'lab-robotics',
+      locationLabel: 'Sample Lab · Robotics Studio, Room 204',
+      status: 'available',
+      hourlyRate: 25,
+      requiresFacultyApproval: false,
+      certificationRequired: 'General Lab Safety',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 2:00 PM',
+      lastCalibrated: 'Nov 15',
+      totalBookings: 294,
+      shortPurpose: 'Program pick-and-place movements, gripper tasks, and ROS motion paths.',
+      description:
+        '6-axis tabletop collaborative robotic arm with Python/ROS support and soft adaptive gripper.',
+      specsPreview: '6-Axis • Python & ROS 2 • Adaptive Gripper',
+      imageUrl: '',
+      clayTheme: 'robot',
+      isSampleData: true,
+      specs: [
+        { label: 'Motion', value: '6-Axis Joint Control', icon: 'precision_manufacturing', tone: 'blue' },
+        { label: 'Coding', value: 'Python / ROS 2', icon: 'terminal', tone: 'mint' },
+        { label: 'Reach', value: '650 mm Benchtop', icon: 'straighten', tone: 'pink' },
+      ],
+      guidelines: [
+        {
+          title: 'Keep E-Stop Close',
+          detail: 'Keep the red emergency stop button within reach while testing new robot code.',
+          icon: 'verified_user',
+        },
+      ],
+    },
+    {
+      id: 'eq-mobile-robot',
+      code: 'RB-302',
+      name: 'Mobile Robot Kit',
+      category: 'Robotics',
+      departmentId: 'dept-rob',
+      departmentName: 'Robotics & Automation',
+      laboratoryId: 'lab-robotics',
+      locationLabel: 'Sample Lab · Robotics Studio, Room 204',
+      status: 'available',
+      hourlyRate: 15,
+      requiresFacultyApproval: false,
+      certificationRequired: 'General Lab Safety',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 1:00 PM',
+      lastCalibrated: 'Nov 13',
+      totalBookings: 256,
+      shortPurpose: 'Test self-driving navigation, LiDAR mapping, and obstacle avoidance.',
+      description:
+        'Wheeled autonomous robot platform equipped with 2D LiDAR scanner, depth camera, and onboard computer.',
+      specsPreview: '2D LiDAR • Depth Camera • ROS Navigation Ready',
+      imageUrl: '',
+      clayTheme: 'mobile_robot',
+      isSampleData: true,
+      specs: [
+        { label: 'Sensors', value: '2D LiDAR + Camera', icon: 'sensors', tone: 'mint' },
+        { label: 'Drive', value: '2WD + Encoders', icon: 'directions_car', tone: 'blue' },
+        { label: 'Battery', value: '3 hrs Run Time', icon: 'battery_charging_full', tone: 'pink' },
+      ],
+      guidelines: [
+        {
+          title: 'Floor Arena Only',
+          detail: 'Test autonomous driving inside the padded floor mat area in Room 204.',
+          icon: 'map',
+        },
+      ],
+    },
+    {
+      id: 'eq-line-follower',
+      code: 'RB-303',
+      name: 'Line Follower Kit',
+      category: 'Robotics',
+      departmentId: 'dept-rob',
+      departmentName: 'Robotics & Automation',
+      laboratoryId: 'lab-robotics',
+      locationLabel: 'Sample Lab · Robotics Studio, Room 204',
+      status: 'available',
+      hourlyRate: 8,
+      requiresFacultyApproval: false,
+      certificationRequired: 'General Lab Safety',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 11:30 AM',
+      lastCalibrated: 'Nov 14',
+      totalBookings: 390,
+      shortPurpose: 'Learn PID speed control and IR sensor tracking on a campus test track.',
+      description:
+        'Beginner-friendly robot car kit with 5-channel IR array, geared DC motors, and rechargeable battery pack.',
+      specsPreview: '5-Sensor IR Array • Arduino Compatible • Practice Track',
+      imageUrl: '',
+      clayTheme: 'line_follower',
+      isSampleData: true,
+      specs: [
+        { label: 'Sensors', value: '5× IR Track Sensors', icon: 'linear_scale', tone: 'pink' },
+        { label: 'Controller', value: 'Arduino Nano', icon: 'memory', tone: 'mint' },
+        { label: 'Track', value: 'Included Test Mat', icon: 'route', tone: 'blue' },
+      ],
+      guidelines: [
+        {
+          title: 'Recharge After Use',
+          detail: 'Switch off the battery pack and plug it into the charging dock when finished.',
+          icon: 'battery_std',
+        },
+      ],
+    },
+
+    // CATEGORY 4 — COMPUTERS & SOFTWARE
+    {
+      id: 'eq-engineering-pc',
+      code: 'CS-401',
+      name: 'Engineering PC',
+      category: 'Computers & Software',
+      departmentId: 'dept-cs',
+      departmentName: 'Computing & VR',
+      laboratoryId: 'lab-computing',
+      locationLabel: 'Sample Lab · Computing Studio, Room 302',
+      status: 'available',
+      hourlyRate: 10,
+      requiresFacultyApproval: false,
+      certificationRequired: 'General Lab Safety',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 12:00 PM',
+      lastCalibrated: 'Nov 15',
+      totalBookings: 740,
+      shortPurpose: 'Run CAD modeling, MATLAB simulations, PCB layout, and engineering software.',
+      description:
+        'High-memory dual-monitor desktop workstation preloaded with SolidWorks, Fusion 360, MATLAB, KiCad, and VS Code.',
+      specsPreview: '64GB RAM • Dual 27" Displays • CAD & MATLAB Installed',
+      imageUrl: '',
+      clayTheme: 'pc',
+      isSampleData: true,
+      specs: [
+        { label: 'Memory', value: '64 GB DDR5 RAM', icon: 'memory', tone: 'blue' },
+        { label: 'Software', value: 'CAD, MATLAB, KiCad', icon: 'apps', tone: 'mint' },
+        { label: 'Displays', value: 'Dual 4K Monitors', icon: 'desktop_windows', tone: 'pink' },
+      ],
+      guidelines: [
+        {
+          title: 'Save to Cloud Drive',
+          detail: 'Save project files to your student cloud folder before signing out.',
+          icon: 'cloud_upload',
+        },
+      ],
+    },
+    {
+      id: 'eq-gpu-workstation',
+      code: 'CS-402',
+      name: 'GPU Workstation',
+      category: 'Computers & Software',
+      departmentId: 'dept-cs',
+      departmentName: 'Computing & VR',
+      laboratoryId: 'lab-computing',
+      locationLabel: 'Sample Lab · Computing Studio, Room 302',
+      status: 'available',
+      hourlyRate: 30,
+      requiresFacultyApproval: true,
+      certificationRequired: 'Cluster Access Check',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Now (Remote or Desk)',
+      lastCalibrated: 'Nov 16',
+      totalBookings: 530,
+      shortPurpose: 'Train machine learning models, computer vision tools, and 3D renders fast.',
+      description:
+        'Dedicated deep learning tower with dual high-VRAM GPUs, CUDA toolkit, PyTorch, and TensorFlow.',
+      specsPreview: 'Dual High-VRAM GPUs • 128GB RAM • PyTorch & CUDA',
+      imageUrl: '',
+      clayTheme: 'gpu',
+      isSampleData: true,
+      specs: [
+        { label: 'Graphics', value: 'Dual 24GB VRAM GPUs', icon: 'developer_board', tone: 'pink' },
+        { label: 'AI Stack', value: 'PyTorch, CUDA, Jupyter', icon: 'terminal', tone: 'blue' },
+        { label: 'Access', value: 'In-Lab or Campus SSH', icon: 'lan', tone: 'mint' },
+      ],
+      guidelines: [
+        {
+          title: 'Save Checkpoints',
+          detail: 'Save training weights regularly so long jobs stay safe if time expires.',
           icon: 'save',
         },
       ],
     },
     {
-      id: 'eq-haas-cnc',
-      code: 'EQ-7704-MFG',
-      name: 'Haas Mini Mill 2 CNC',
-      category: 'Manufacturing',
-      departmentId: 'dept-fab',
-      departmentName: 'Materials & Mfg',
-      laboratoryId: 'lab-proto',
-      locationLabel: 'Precision Machine Shop, Bay 3',
+      id: 'eq-vr-headset',
+      code: 'CS-403',
+      name: 'VR Headset',
+      category: 'Computers & Software',
+      departmentId: 'dept-cs',
+      departmentName: 'Computing & VR',
+      laboratoryId: 'lab-computing',
+      locationLabel: 'Sample Lab · Computing Studio, Room 302',
       status: 'in_use',
-      hourlyRate: 50,
-      requiresFacultyApproval: true,
-      certificationRequired: 'Machine Shop Green Tag',
-      biosafetyLevel: 'ANSI Z87 Eye Protection',
-      nextSlotLabel: 'Thu, 10:30 AM',
-      lastCalibrated: 'Oct 10',
-      totalBookings: 198,
+      hourlyRate: 15,
+      requiresFacultyApproval: false,
+      certificationRequired: 'General Lab Safety',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 4:30 PM',
+      lastCalibrated: 'Nov 13',
+      totalBookings: 215,
+      shortPurpose: 'Test virtual 3D spaces, Unity/Unreal apps, and interactive simulations.',
       description:
-        'Compact 3-axis vertical CNC machining center with 10-pocket automatic tool changer for aluminum housings, microfluidic molds, and fixtures.',
-      specsPreview: '16 × 12 × 10 in • 6000 RPM • 10-Tool ATC',
+        'Standalone & PC-tethered virtual reality headset with hand controllers and dedicated playspace mat.',
+      specsPreview: '4K Per-Eye • Hand Tracking • Unity & Unreal Ready',
       imageUrl: '',
-      clayTheme: 'cnc',
+      clayTheme: 'vr',
+      isSampleData: true,
       specs: [
-        { label: 'XYZ Travel', value: '16 × 12 × 10 in', icon: 'open_with', tone: 'mint' },
-        { label: 'Spindle', value: '6000 RPM • 7.5 HP', icon: 'cyclone', tone: 'blue' },
-        { label: 'Tool Changer', value: '10-Tool Carousel ATC', icon: 'build', tone: 'pink' },
-        { label: 'Probing', value: 'Renishaw Wireless', icon: 'gps_fixed', tone: 'neutral' },
-        { label: 'CAM Post', value: 'Fusion 360 Haas NGC', icon: 'code', tone: 'mint' },
-        { label: 'Coolant', value: 'Flood + Air Blast', icon: 'water_drop', tone: 'blue' },
+        { label: 'Tracking', value: '6-DOF Inside-Out', icon: '360', tone: 'mint' },
+        { label: 'Engines', value: 'Unity, Unreal, WebXR', icon: 'view_in_ar', tone: 'blue' },
+        { label: 'Controllers', value: '2× Haptic Handsets', icon: 'sports_esports', tone: 'pink' },
       ],
       guidelines: [
         {
-          title: 'Dry Run Mandatory',
-          detail: 'Simulate toolpaths in Graphics Mode and verify Z-zero height before spindle engage.',
+          title: 'Wipe Foam Pad',
+          detail: 'Use the provided sanitizer wipes on the face cushion after each session.',
+          icon: 'cleaning_services',
+        },
+      ],
+    },
+
+    // CATEGORY 5 — TESTING & MEASUREMENT
+    {
+      id: 'eq-digital-multimeter',
+      code: 'TM-501',
+      name: 'Digital Multimeter',
+      category: 'Testing & Measurement',
+      departmentId: 'dept-ece',
+      departmentName: 'Electrical & Circuits',
+      laboratoryId: 'lab-testing',
+      locationLabel: 'Sample Lab · Testing Bench, Room 112',
+      status: 'available',
+      hourlyRate: 5,
+      requiresFacultyApproval: false,
+      certificationRequired: 'General Lab Safety',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 12:30 PM',
+      lastCalibrated: 'Nov 12',
+      totalBookings: 820,
+      shortPurpose: 'Measure voltage, current, resistance, and check circuit connections safely.',
+      description:
+        'True-RMS bench & handheld digital multimeter with backlit screen, continuity beep, and fused current inputs.',
+      specsPreview: 'True-RMS • Voltage, Current, Ohms • Continuity Beep',
+      imageUrl: '',
+      clayTheme: 'multimeter',
+      isSampleData: true,
+      specs: [
+        { label: 'Modes', value: 'V, A, Ω, Continuity', icon: 'electric_meter', tone: 'mint' },
+        { label: 'Accuracy', value: 'True-RMS Auto-Range', icon: 'tune', tone: 'blue' },
+        { label: 'Probes', value: 'Alligator + Needle Leads', icon: 'cable', tone: 'pink' },
+      ],
+      guidelines: [
+        {
+          title: 'Check Probe Jacks',
+          detail: 'Move the red lead back to the V/Ω jack after measuring current to protect fuses.',
+          icon: 'verified_user',
+        },
+      ],
+    },
+    {
+      id: 'eq-vernier-caliper',
+      code: 'TM-502',
+      name: 'Digital Vernier Caliper',
+      category: 'Testing & Measurement',
+      departmentId: 'dept-ece',
+      departmentName: 'Electrical & Circuits',
+      laboratoryId: 'lab-testing',
+      locationLabel: 'Sample Lab · Testing Bench, Room 112',
+      status: 'available',
+      hourlyRate: 5,
+      requiresFacultyApproval: false,
+      certificationRequired: 'General Lab Safety',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 12:00 PM',
+      lastCalibrated: 'Nov 15',
+      totalBookings: 645,
+      shortPurpose: 'Measure small part sizes, hole diameters, and thicknesses down to 0.01 mm.',
+      description:
+        'Stainless steel digital sliding caliper with instant millimeter/inch toggle and zero reset button.',
+      specsPreview: '0–150 mm Range • ±0.02 mm Accuracy • mm / inch Switch',
+      imageUrl: '',
+      clayTheme: 'caliper',
+      isSampleData: true,
+      specs: [
+        { label: 'Range', value: '0 – 150 mm (6 in)', icon: 'straighten', tone: 'blue' },
+        { label: 'Resolution', value: '0.01 mm / 0.0005 in', icon: 'center_focus_strong', tone: 'mint' },
+        { label: 'Modes', value: 'Outer, Inner & Depth', icon: 'architecture', tone: 'pink' },
+      ],
+      guidelines: [
+        {
+          title: 'Zero Before Measuring',
+          detail: 'Close the jaws gently and press Zero before taking part measurements.',
+          icon: 'tune',
+        },
+      ],
+    },
+    {
+      id: 'eq-power-supply',
+      code: 'TM-503',
+      name: 'Power Supply',
+      category: 'Testing & Measurement',
+      departmentId: 'dept-ece',
+      departmentName: 'Electrical & Circuits',
+      laboratoryId: 'lab-testing',
+      locationLabel: 'Sample Lab · Testing Bench, Room 112',
+      status: 'available',
+      hourlyRate: 8,
+      requiresFacultyApproval: false,
+      certificationRequired: 'General Lab Safety',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 2:30 PM',
+      lastCalibrated: 'Nov 11',
+      totalBookings: 472,
+      shortPurpose: 'Give steady, adjustable DC voltage and current limits to your circuits.',
+      description:
+        'Triple-output programmable DC bench power supply with current limiting to protect breadboards from shorts.',
+      specsPreview: '0–30V DC • 0–5A Current Limit • Digital Readout',
+      imageUrl: '',
+      clayTheme: 'power_supply',
+      isSampleData: true,
+      specs: [
+        { label: 'Output', value: '0–30V DC (3 Channels)', icon: 'bolt', tone: 'pink' },
+        { label: 'Protection', value: 'Adjustable Current Cap', icon: 'shield', tone: 'mint' },
+        { label: 'Leads', value: 'Banana-to-Clip Cables', icon: 'cable', tone: 'blue' },
+      ],
+      guidelines: [
+        {
+          title: 'Set Current Limit First',
+          detail: 'Set your voltage and current limit before pressing the Output On button.',
+          icon: 'power_settings_new',
+        },
+      ],
+    },
+
+    // CATEGORY 6 — MECHANICAL WORKSHOP
+    {
+      id: 'eq-lathe-machine',
+      code: 'MW-601',
+      name: 'Lathe Machine',
+      category: 'Mechanical Workshop',
+      departmentId: 'dept-fab',
+      departmentName: 'Making & Workshop',
+      laboratoryId: 'lab-workshop',
+      locationLabel: 'Sample Lab · Mechanical Workshop, Bay 03',
+      status: 'available',
+      hourlyRate: 35,
+      requiresFacultyApproval: true,
+      certificationRequired: 'Workshop Safety Training',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Tomorrow, 9:00 AM',
+      lastCalibrated: 'Nov 07',
+      totalBookings: 164,
+      shortPurpose: 'Spin and shape smooth round metal rods, shafts, threads, and bushings.',
+      description:
+        'Precision benchtop metal lathe with variable spindle speed, digital readout, and safety chuck guard.',
+      specsPreview: 'Variable RPM • Digital Readout • Safety Chuck Shield',
+      imageUrl: '',
+      clayTheme: 'lathe',
+      isSampleData: true,
+      specs: [
+        { label: 'Swing', value: '250 mm Over Bed', icon: 'cyclone', tone: 'mint' },
+        { label: 'Speed', value: '100–2500 RPM', icon: 'speed', tone: 'blue' },
+        { label: 'Safety', value: 'Goggles & Guard Required', icon: 'shield', tone: 'pink' },
+      ],
+      guidelines: [
+        {
+          title: 'Remove Chuck Key',
+          detail: 'Never leave the chuck key inside the chuck. Tie back hair and wear safety glasses.',
+          icon: 'warning',
+        },
+      ],
+    },
+    {
+      id: 'eq-milling-machine',
+      code: 'MW-602',
+      name: 'Milling Machine',
+      category: 'Mechanical Workshop',
+      departmentId: 'dept-fab',
+      departmentName: 'Making & Workshop',
+      laboratoryId: 'lab-workshop',
+      locationLabel: 'Sample Lab · Mechanical Workshop, Bay 03',
+      status: 'maintenance',
+      hourlyRate: 35,
+      requiresFacultyApproval: true,
+      certificationRequired: 'Workshop Safety Training',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Thu, 1:00 PM',
+      lastCalibrated: 'Nov 04',
+      totalBookings: 148,
+      shortPurpose: 'Cut flat surfaces, slots, and precise holes into aluminum or steel blocks.',
+      description:
+        'Vertical manual & DRO knee milling machine for heavy-duty brackets, slotted mounts, and flat stock.',
+      specsPreview: '3-Axis DRO • Precision Vise • Safety Shield',
+      imageUrl: '',
+      clayTheme: 'mill',
+      isSampleData: true,
+      specs: [
+        { label: 'Table Travel', value: '450 × 200 mm', icon: 'open_with', tone: 'blue' },
+        { label: 'Readout', value: '3-Axis Digital Scale', icon: 'straighten', tone: 'mint' },
+        { label: 'Holding', value: '6-Inch Precision Vise', icon: 'build', tone: 'pink' },
+      ],
+      guidelines: [
+        {
+          title: 'Lock Unused Axes',
+          detail: 'Clamp your workpiece tightly in the vise and lock idle table axes before cutting.',
           icon: 'fact_check',
         },
       ],
     },
     {
-      id: 'eq-rigaku-xrd',
-      code: 'EQ-6102-MAT',
-      name: 'Rigaku SmartLab XRD',
-      category: 'Research',
-      departmentId: 'dept-mat',
-      departmentName: 'Materials & Chem',
-      laboratoryId: 'lab-xrd',
-      locationLabel: 'Materials Diffraction Bay, Bay 04',
+      id: 'eq-drill-press',
+      code: 'MW-603',
+      name: 'Drill Press',
+      category: 'Mechanical Workshop',
+      departmentId: 'dept-fab',
+      departmentName: 'Making & Workshop',
+      laboratoryId: 'lab-workshop',
+      locationLabel: 'Sample Lab · Mechanical Workshop, Bay 03',
       status: 'available',
-      hourlyRate: 55,
-      requiresFacultyApproval: true,
-      certificationRequired: 'XRD Radiation Safety',
-      biosafetyLevel: 'Cabinet X-Ray Interlock',
-      nextSlotLabel: 'Today, 12:00 PM',
-      lastCalibrated: 'Oct 21',
-      totalBookings: 365,
+      hourlyRate: 15,
+      requiresFacultyApproval: false,
+      certificationRequired: 'Workshop Safety Briefing',
+      biosafetyLevel: 'Sample Lab Data',
+      nextSlotLabel: 'Today, 3:30 PM',
+      lastCalibrated: 'Nov 14',
+      totalBookings: 405,
+      shortPurpose: 'Drill straight, accurate holes in wood, plastic plates, and metal parts.',
       description:
-        'High-resolution multipurpose X-ray diffractometer for thin-film GI-XRD, reciprocal space mapping, and battery/catalyst phase identification.',
-      specsPreview: '9 kW Rotating Anode • HyPix-3000 • Thin-Film Stage',
+        'Floor-standing variable-speed drill press with laser center guide, depth stop, and table vise.',
+      specsPreview: '16-Speed • Laser Crosshair • Depth Stop & Vise',
       imageUrl: '',
-      clayTheme: 'xrd',
+      clayTheme: 'drill_press',
+      isSampleData: true,
       specs: [
-        { label: 'X-Ray Source', value: 'Cu Kα • 9 kW Anode', icon: 'flare', tone: 'pink' },
-        { label: 'Detector', value: 'HyPix-3000 2D Hybrid', icon: 'camera', tone: 'blue' },
-        { label: 'Optics', value: 'CBO Auto-Switch', icon: 'tune', tone: 'mint' },
-        { label: 'Angular Res.', value: '0.0001° Step', icon: 'straighten', tone: 'neutral' },
-        { label: 'Sample Stage', value: 'Eulerian Cradle + Z', icon: 'layers', tone: 'mint' },
-        { label: 'Software', value: 'SmartLab Studio II', icon: 'analytics', tone: 'blue' },
+        { label: 'Chuck Size', value: '1.5 – 16 mm Bits', icon: 'build', tone: 'pink' },
+        { label: 'Guide', value: 'Laser Center Dot', icon: 'gps_fixed', tone: 'mint' },
+        { label: 'Table', value: 'Tilting + Clamp Slots', icon: 'layers', tone: 'blue' },
       ],
       guidelines: [
         {
-          title: 'Dosimeter Badge',
-          detail: 'Wear personal TLD ring/badge when loading specimens into the goniometer chamber.',
-          icon: 'badge',
-        },
-      ],
-    },
-    {
-      id: 'eq-bruker-d8',
-      code: 'EQ-6109-MAT',
-      name: 'Bruker D8 Advance XRD',
-      category: 'Research',
-      departmentId: 'dept-mat',
-      departmentName: 'Materials & Chem',
-      laboratoryId: 'lab-xrd',
-      locationLabel: 'Materials Diffraction Bay, Bay 02',
-      status: 'available',
-      hourlyRate: 48,
-      requiresFacultyApproval: true,
-      certificationRequired: 'XRD Radiation Safety',
-      biosafetyLevel: 'Cabinet X-Ray Interlock',
-      nextSlotLabel: 'Today, 2:00 PM',
-      lastCalibrated: 'Oct 19',
-      totalBookings: 290,
-      description:
-        'Automated powder & polycrystalline X-ray diffractometer featuring a 9-position sample changer and LynxEye XE-T energy-dispersive detector.',
-      specsPreview: 'Cu Kα1 • 9-Sample Changer • LynxEye XE-T',
-      imageUrl: '',
-      clayTheme: 'xrd',
-      specs: [
-        { label: 'Source', value: '2.2 kW Cu Sealed Tube', icon: 'flare', tone: 'blue' },
-        { label: 'Detector', value: 'LynxEye XE-T', icon: 'camera', tone: 'mint' },
-        { label: 'Autoloader', value: '9-Position Carousel', icon: 'autorenew', tone: 'pink' },
-        { label: 'Temp Stage', value: 'Ambient to 900°C', icon: 'thermostat', tone: 'neutral' },
-        { label: 'Geometry', value: 'Bragg-Brentano θ/θ', icon: 'architecture', tone: 'mint' },
-        { label: 'Database', value: 'ICDD PDF-5+ Linked', icon: 'database', tone: 'blue' },
-      ],
-      guidelines: [
-        {
-          title: 'Powder Containment',
-          detail: 'Press fine nanoparticle powders flush into zero-background silicon holders.',
-          icon: 'science',
+          title: 'Always Clamp Parts',
+          detail: 'Never hold small metal or plastic parts by hand while drilling—always use a clamp.',
+          icon: 'verified_user',
         },
       ],
     },
@@ -592,54 +965,54 @@ function createInitialSeed(): LabLinkDatabase {
 
   const projects: ResearchProject[] = [
     {
-      id: 'proj-crispr',
+      id: 'proj-arduino',
       ownerId: 'usr-alex',
       ownerName: 'Alex Rivera',
-      title: 'CRISPR Assay Kit',
-      grantCode: 'NIH-R01',
-      department: 'Bioengineering',
-      category: 'Wet Lab',
-      description: 'Cas9 guide RNA validation & high-sensitivity fluorescence plate readout for neural organoids.',
+      title: 'Smart Weather Sensor Node',
+      grantCode: 'EE-101',
+      department: 'Electrical & Circuits',
+      category: 'Electronics & Circuits',
+      description: 'Build and test a solar-powered temperature and air sensor node using ESP32 and Arduino.',
       deadline: inTwoDays,
       progress: 78,
       tone: 'mint',
-      icon: 'biotech',
-      recommendedEquipmentIds: ['eq-zeiss-lsm980', 'eq-dgx-a100'],
-      aiAnalysisSummary: 'Requires spectral confocal imaging (Airyscan 2) + GPU image deconvolution.',
-      status: 'active',
-    },
-    {
-      id: 'proj-microfluidic',
-      ownerId: 'usr-alex',
-      ownerName: 'Alex Rivera',
-      title: 'Microfluidic Chip v2',
-      grantCode: 'NSF-22',
-      department: 'Bioengineering',
-      category: 'Cleanroom',
-      description: 'Sub-100μm PDMS channel bonding, resin master mold fabrication, and droplet flow calibration.',
-      deadline: getTodayDateString(5),
-      progress: 45,
-      tone: 'blue',
       icon: 'memory',
-      recommendedEquipmentIds: ['eq-formlabs-3l', 'eq-haas-cnc'],
-      aiAnalysisSummary: 'High-resolution 25μm SLA master mold followed by CNC aluminum manifold fixture.',
+      recommendedEquipmentIds: ['eq-arduino-kit', 'eq-esp32-board', 'eq-digital-oscilloscope'],
+      aiAnalysisSummary: 'Great fit for ESP32 Board, Digital Oscilloscope, and Power Supply testing.',
       status: 'active',
     },
     {
-      id: 'proj-spectroscopy',
+      id: 'proj-rover',
       ownerId: 'usr-alex',
       ownerName: 'Alex Rivera',
-      title: 'Spectroscopy Run',
-      grantCode: 'PILOT-26',
-      department: 'Materials & Chem',
-      category: 'Imaging',
-      description: 'Thin-film perovskite & nanoparticle baseline characterization across multiple diffraction angles.',
+      title: 'Campus Delivery Robot',
+      grantCode: 'ROBO-22',
+      department: 'Robotics & Automation',
+      category: 'Robotics',
+      description: '3D-print custom sensor mounts and test autonomous navigation on the studio floor.',
+      deadline: getTodayDateString(5),
+      progress: 52,
+      tone: 'blue',
+      icon: 'precision_manufacturing',
+      recommendedEquipmentIds: ['eq-3d-printer', 'eq-mobile-robot', 'eq-robotic-arm'],
+      aiAnalysisSummary: 'Use 3D Printer for brackets and Mobile Robot Kit for LiDAR path testing.',
+      status: 'active',
+    },
+    {
+      id: 'proj-gripper',
+      ownerId: 'usr-alex',
+      ownerName: 'Alex Rivera',
+      title: 'Lightweight Arm Gripper',
+      grantCode: 'MECH-09',
+      department: 'Making & Workshop',
+      category: 'Mechanical Workshop',
+      description: 'Machine aluminum links and verify tolerances with digital calipers before assembly.',
       deadline: getTodayDateString(7),
-      progress: 92,
+      progress: 90,
       tone: 'pink',
-      icon: 'visibility',
-      recommendedEquipmentIds: ['eq-rigaku-xrd', 'eq-bruker-d8'],
-      aiAnalysisSummary: 'Thin-film stage on Rigaku SmartLab recommended for grazing-incidence scans.',
+      icon: 'build',
+      recommendedEquipmentIds: ['eq-cnc-machine', 'eq-vernier-caliper', 'eq-drill-press'],
+      aiAnalysisSummary: 'Pair CNC Machine cutting with Digital Vernier Caliper checks.',
       status: 'active',
     },
   ];
@@ -647,105 +1020,105 @@ function createInitialSeed(): LabLinkDatabase {
   const bookings: Booking[] = [
     {
       id: 'bk-101',
-      equipmentId: 'eq-zeiss-lsm980',
-      equipmentName: 'Zeiss LSM 980 Confocal Microscope',
+      equipmentId: 'eq-arduino-kit',
+      equipmentName: 'Arduino Starter Kit',
       userId: 'usr-alex',
       userName: 'Alex Rivera',
-      userRoleTitle: 'Graduate Researcher • Bioengineering',
-      projectId: 'proj-crispr',
-      projectTitle: 'CRISPR Assay Kit (NIH-R01)',
+      userRoleTitle: 'Student Researcher • Bioengineering',
+      projectId: 'proj-arduino',
+      projectTitle: 'Smart Weather Sensor Node (EE-101)',
       date: today,
       startHour: 14,
       durationHours: 2,
       status: 'confirmed',
-      totalCost: 90,
+      totalCost: 10,
       facultyReviewerName: 'Dr. Elena Rostova',
       createdAt: new Date().toISOString(),
     },
     {
       id: 'bk-102',
-      equipmentId: 'eq-ur5e-arm',
-      equipmentName: 'UR5e Collaborative Robot Arm',
+      equipmentId: 'eq-robotic-arm',
+      equipmentName: 'Robotic Arm',
       userId: 'usr-alex',
       userName: 'Alex Rivera',
-      userRoleTitle: 'Graduate Researcher • Bioengineering',
-      projectId: 'proj-microfluidic',
-      projectTitle: 'Microfluidic Chip v2 (NSF-22)',
+      userRoleTitle: 'Student Researcher • Bioengineering',
+      projectId: 'proj-rover',
+      projectTitle: 'Campus Delivery Robot (ROBO-22)',
       date: tomorrow,
       startHour: 9,
       durationHours: 3,
       status: 'confirmed',
-      totalCost: 90,
+      totalCost: 75,
       createdAt: new Date().toISOString(),
     },
     {
       id: 'bk-201',
-      equipmentId: 'eq-zeiss-lsm980',
-      equipmentName: 'Zeiss LSM 980 Confocal Microscope',
+      equipmentId: 'eq-laser-cutter',
+      equipmentName: 'Laser Cutter',
       userId: 'usr-maya',
       userName: 'Maya Lin',
-      userRoleTitle: 'PhD Candidate • Bioengineering',
-      projectId: 'proj-crispr',
-      projectTitle: 'Cellular Organelle Fluorescence Mapping',
+      userRoleTitle: 'PhD Candidate • Materials Science',
+      projectId: 'proj-rover',
+      projectTitle: 'Acrylic Sensor Enclosure',
       date: inTwoDays,
       startHour: 14,
-      durationHours: 3,
+      durationHours: 2,
       status: 'pending',
-      totalCost: 135,
+      totalCost: 40,
       urgencyTag: 'Urgent',
-      aiNote: 'Zero conflicts detected. Adjacent wet-bench B204 is also free if sample prep is needed.',
+      aiNote: 'No overlaps found. Laser Safety Briefing is already on file.',
       createdAt: new Date().toISOString(),
     },
     {
       id: 'bk-202',
-      equipmentId: 'eq-rigaku-xrd',
-      equipmentName: 'Rigaku SmartLab XRD',
+      equipmentId: 'eq-cnc-machine',
+      equipmentName: 'CNC Machine',
       userId: 'usr-liam',
       userName: 'Liam Vance',
-      userRoleTitle: 'Senior Thesis • Organic Chem',
-      projectId: 'proj-spectroscopy',
-      projectTitle: 'Catalyst Ligand Purity Verification',
+      userRoleTitle: 'M.S. Researcher • Mechanical',
+      projectId: 'proj-gripper',
+      projectTitle: 'Aluminum Motor Mounts',
       date: inTwoDays,
       startHour: 9,
       durationHours: 2,
       status: 'pending',
-      totalCost: 110,
+      totalCost: 60,
       urgencyTag: 'Routine',
-      aiNote: 'Liquid nitrogen refill scheduled 09:00–09:30. Recommend shifting slot to 10:00–12:00.',
+      aiNote: 'Spindle warm-up window is free at 09:00. Good open slot.',
       createdAt: new Date().toISOString(),
     },
     {
       id: 'bk-203',
-      equipmentId: 'eq-bruker-d8',
-      equipmentName: 'Bruker D8 Advance XRD',
-      userId: 'usr-elena',
-      userName: 'Elena Rostova',
-      userRoleTitle: 'Postdoc • Materials Science',
-      projectId: 'proj-spectroscopy',
-      projectTitle: 'Graphene Lattice Defect Imaging',
+      equipmentId: 'eq-gpu-workstation',
+      equipmentName: 'GPU Workstation',
+      userId: 'usr-maya',
+      userName: 'Maya Lin',
+      userRoleTitle: 'PhD Candidate • Materials Science',
+      projectId: 'proj-arduino',
+      projectTitle: 'Vision Model Training Run',
       date: getTodayDateString(3),
       startHour: 13,
       durationHours: 3,
       status: 'pending',
-      totalCost: 144,
+      totalCost: 90,
       urgencyTag: 'Certified',
-      aiNote: 'Optimal power-grid window. Safety certification Level 3 verified on file.',
+      aiNote: 'Remote SSH access verified and 128GB RAM is open.',
       createdAt: new Date().toISOString(),
     },
     {
       id: 'bk-301',
-      equipmentId: 'eq-rigaku-xrd',
-      equipmentName: 'Rigaku SmartLab XRD',
+      equipmentId: 'eq-3d-printer',
+      equipmentName: '3D Printer',
       userId: 'usr-maya',
       userName: 'Maya Lin',
       userRoleTitle: 'PhD Candidate • Materials Science',
-      projectId: 'proj-spectroscopy',
-      projectTitle: 'Perovskite Thin-Film XRD',
+      projectId: 'proj-rover',
+      projectTitle: 'Bracket Prototype v2',
       date: today,
       startHour: 8,
       durationHours: 2,
       status: 'confirmed',
-      totalCost: 110,
+      totalCost: 24,
       createdAt: new Date().toISOString(),
     },
   ];
@@ -754,9 +1127,9 @@ function createInitialSeed(): LabLinkDatabase {
     {
       id: 'fs-2048',
       caseCode: 'CASE #FS-2048',
-      equipmentId: 'eq-rigaku-xrd',
-      equipmentName: 'Rigaku SmartLab XRD',
-      bayLabel: 'Bay 04',
+      equipmentId: 'eq-cnc-machine',
+      equipmentName: 'CNC Machine',
+      bayLabel: 'Room 08',
       date: today,
       conflictStartHour: 14,
       conflictEndHour: 16,
@@ -764,7 +1137,7 @@ function createInitialSeed(): LabLinkDatabase {
       fairnessScore: 96,
       headlineRecommendation: 'Keep Maya Lin in 14:00–16:00 & move Liam Vance to 16:30–18:30',
       explanation:
-        'Maya’s journal revision deadline is in 18 hours and she has only used 33% of her weekly XRD quota. Liam’s milestone is 5 days away, and shifting him by 2.5 hours preserves his exact Rigaku SmartLab calibration profile with zero sample degradation.',
+        'Maya has a class demo tomorrow morning and has used less weekly workshop time. Moving Liam to 16:30 keeps both projects on track with zero tool changes.',
       candidates: [
         {
           bookingId: 'bk-fs-maya',
@@ -772,8 +1145,8 @@ function createInitialSeed(): LabLinkDatabase {
           studentName: 'Maya Lin',
           studentInitials: 'ML',
           studentTitle: 'PhD Candidate • Materials Science',
-          projectTitle: 'Perovskite Thin-Film XRD',
-          deadlineDescription: 'Nature Energy revision submission due tomorrow, 08:00 AM.',
+          projectTitle: 'Sensor Bracket Prototype',
+          deadlineDescription: 'Demo due tomorrow at 08:00 AM.',
           hoursUntilDeadline: 18,
           priorityScore: 94,
           weeklyUsedHours: 2.0,
@@ -787,9 +1160,9 @@ function createInitialSeed(): LabLinkDatabase {
           studentId: 'usr-liam',
           studentName: 'Liam Vance',
           studentInitials: 'LV',
-          studentTitle: 'M.S. Researcher • Chemical Eng.',
-          projectTitle: 'Catalyst Surface Characterization',
-          deadlineDescription: 'Weekly lab group milestone due in 5 days, 17:00 PM.',
+          studentTitle: 'M.S. Researcher • Mechanical',
+          projectTitle: 'Robotic Arm Mounting Plate',
+          deadlineDescription: 'Lab milestone due in 5 days.',
           hoursUntilDeadline: 120,
           priorityScore: 72,
           weeklyUsedHours: 4.5,
@@ -801,22 +1174,22 @@ function createInitialSeed(): LabLinkDatabase {
       ],
       factors: [
         {
-          title: 'Deadline Urgency',
+          title: 'Closer Deadline',
           icon: 'bolt',
           tone: 'mint',
-          detail: '18h vs. 5d buffer weights Maya’s slot 3.2× higher.',
+          detail: 'Maya’s demo is in 18 hours while Liam has 5 days left.',
         },
         {
-          title: 'Quota Equity',
+          title: 'Fair Weekly Hours',
           icon: 'balance',
           tone: 'blue',
-          detail: 'Maya has 4.0h remaining; Liam has 1.5h remaining this week.',
+          detail: 'Maya has 4.0h remaining this week; Liam has 1.5h left.',
         },
         {
-          title: 'Zero Retuning',
+          title: 'Same Setup',
           icon: 'tune',
           tone: 'pink',
-          detail: '16:30 slot follows directly after Maya’s thin-film optics setup.',
+          detail: 'The 16:30 slot keeps the same aluminum tool bit loaded.',
         },
       ],
       alternatives: [
@@ -828,23 +1201,23 @@ function createInitialSeed(): LabLinkDatabase {
           date: today,
           startHour: 16,
           durationHours: 2,
-          equipmentId: 'eq-rigaku-xrd',
-          equipmentName: 'Rigaku SmartLab XRD',
-          bayLabel: 'Bay 04',
-          rationale: 'Same-day completion with zero instrument recalibration needed.',
+          equipmentId: 'eq-cnc-machine',
+          equipmentName: 'CNC Machine',
+          bayLabel: 'Room 08',
+          rationale: 'Finish today right after Maya’s run with no setup change.',
         },
         {
           id: 'alt-2',
-          badge: 'Parallel Bay',
+          badge: 'Next Tool',
           score: 89,
           timeLabel: 'Today, 14:00 – 16:00',
           date: today,
           startHour: 14,
           durationHours: 2,
-          equipmentId: 'eq-bruker-d8',
-          equipmentName: 'Bruker D8 Advance',
-          bayLabel: 'Bay 02',
-          rationale: 'Keeps exact requested time; requires 15m sample holder swap.',
+          equipmentId: 'eq-lathe-machine',
+          equipmentName: 'Lathe Machine',
+          bayLabel: 'Bay 03',
+          rationale: 'Same afternoon time in the Mechanical Workshop.',
         },
         {
           id: 'alt-3',
@@ -854,18 +1227,18 @@ function createInitialSeed(): LabLinkDatabase {
           date: tomorrow,
           startHour: 9,
           durationHours: 2,
-          equipmentId: 'eq-rigaku-xrd',
-          equipmentName: 'Rigaku SmartLab XRD',
-          bayLabel: 'Bay 04',
-          rationale: 'Fresh morning queue with 4 days remaining before milestone.',
+          equipmentId: 'eq-cnc-machine',
+          equipmentName: 'CNC Machine',
+          bayLabel: 'Room 08',
+          rationale: 'Fresh morning session with plenty of time before deadline.',
         },
       ],
       timelineBlocks: [
         { hourLabel: '08:00', startHour: 8, label: 'Dr. Patel', kind: 'booked' },
-        { hourLabel: '10:00', startHour: 10, label: 'Maintenance', kind: 'booked' },
+        { hourLabel: '10:00', startHour: 10, label: 'Check', kind: 'booked' },
         { hourLabel: '12:00', startHour: 12, label: 'Open', kind: 'open' },
         { hourLabel: '14:00', startHour: 14, label: 'Conflict (2)', kind: 'conflict' },
-        { hourLabel: '16:00', startHour: 16, label: 'Liam (AI)', kind: 'ai_suggested' },
+        { hourLabel: '16:00', startHour: 16, label: 'Liam (Smart)', kind: 'ai_suggested' },
         { hourLabel: '18:00', startHour: 18, label: 'Open', kind: 'open' },
       ],
       selectedAlternativeId: 'alt-1',
@@ -875,33 +1248,33 @@ function createInitialSeed(): LabLinkDatabase {
   const maintenance: MaintenanceLog[] = [
     {
       id: 'mnt-1',
-      equipmentId: 'eq-zeiss-lsm980',
-      equipmentName: 'Zeiss LSM 980 Confocal',
-      technician: 'Dr. Elena Rostova',
-      taskTitle: 'Airyscan Detector Alignment',
+      equipmentId: 'eq-3d-printer',
+      equipmentName: '3D Printer',
+      technician: 'Prof. Lucas Meyer',
+      taskTitle: 'Nozzle & Bed Level Check',
       status: 'cleared',
       scheduledDate: today,
-      notes: 'All 4 laser lines within 0.4% power tolerance.',
+      notes: 'First-layer calibration passed.',
     },
     {
       id: 'mnt-2',
-      equipmentId: 'eq-rigaku-xrd',
-      equipmentName: 'Rigaku SmartLab XRD',
+      equipmentId: 'eq-cnc-machine',
+      equipmentName: 'CNC Machine',
       technician: 'R. Gomez',
-      taskTitle: 'Goniometer Zero-Angle Check',
+      taskTitle: 'Spindle Bit Inspection',
       status: 'scheduled',
       scheduledDate: inTwoDays,
-      notes: 'Routine 30-minute morning calibration window.',
+      notes: 'Routine 20-minute morning check.',
     },
     {
       id: 'mnt-3',
-      equipmentId: 'eq-haas-cnc',
-      equipmentName: 'Haas Mini Mill 2 CNC',
+      equipmentId: 'eq-milling-machine',
+      equipmentName: 'Milling Machine',
       technician: 'M. Alvarez',
-      taskTitle: 'Coolant Filter & Spindle Runout Check',
+      taskTitle: 'Axis Lubrication & Guard Check',
       status: 'in_progress',
       scheduledDate: today,
-      notes: 'ETA 2 hours before afternoon bay reopens.',
+      notes: 'Scheduled to reopen Thursday afternoon.',
     },
   ];
 
@@ -909,8 +1282,8 @@ function createInitialSeed(): LabLinkDatabase {
     {
       id: 'ntf-1',
       userId: 'usr-alex',
-      title: 'Confocal Microscope Confirmed',
-      message: 'Approved by Dr. Rostova for Bio-Imaging Core • Today 2:00 PM – 4:00 PM.',
+      title: 'Arduino Starter Kit Confirmed',
+      message: 'Booked for Electronics Lab, Room 104 • Today 2:00 PM – 4:00 PM.',
       type: 'confirmed',
       read: false,
       createdAt: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
@@ -918,8 +1291,8 @@ function createInitialSeed(): LabLinkDatabase {
     {
       id: 'ntf-2',
       userId: 'usr-alex',
-      title: 'Safety Certification Active',
-      message: 'Level 2 Confocal & Biosafety Level 1 verified for Spring Semester.',
+      title: 'Safety Training Active',
+      message: 'General Lab Safety verified for Spring Semester.',
       type: 'info',
       read: false,
       createdAt: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
@@ -927,20 +1300,42 @@ function createInitialSeed(): LabLinkDatabase {
     {
       id: 'ntf-3',
       userId: 'usr-elena',
-      title: 'FairSlot Case #FS-2048 Ready for Review',
-      message: 'Rigaku SmartLab XRD overlap between Maya Lin & Liam Vance has an AI fairness plan.',
+      title: 'Booking Conflict #FS-2048 Ready',
+      message: 'CNC Machine overlap between Maya Lin & Liam Vance has a suggested alternative.',
       type: 'ai',
       read: false,
       createdAt: new Date(Date.now() - 1000 * 60 * 20).toISOString(),
     },
   ];
 
+  const accessRequests: AccessRequest[] = [
+    {
+      id: 'ar-101',
+      projectId: 'proj-arduino',
+      projectTitle: 'Smart Weather Sensor Node',
+      userId: 'usr-alex',
+      userName: 'Alex Rivera',
+      userDepartment: 'Bioengineering',
+      equipmentId: 'eq-digital-oscilloscope',
+      equipmentName: 'Digital Oscilloscope',
+      requestedHours: 3,
+      preferredDate: tomorrow,
+      deadline: inTwoDays,
+      justification: 'Verify solar charge controller ripple and ESP32 sensor timing before field test.',
+      status: 'pending',
+      createdAt: new Date(Date.now() - 1000 * 60 * 90).toISOString(),
+    },
+  ];
+
   return {
+    catalogVersion: CURRENT_CATALOG_VERSION,
     users,
+    authorizedAdmins,
     departments,
     laboratories,
     equipment,
     projects,
+    accessRequests,
     bookings,
     conflicts,
     maintenance,
@@ -961,12 +1356,30 @@ class LabLinkStore {
       if (fs.existsSync(DATA_FILE)) {
         const raw = fs.readFileSync(DATA_FILE, 'utf8');
         const parsed = JSON.parse(raw) as LabLinkDatabase;
-        if (parsed && Array.isArray(parsed.equipment) && Array.isArray(parsed.users)) {
+        if (
+          parsed &&
+          parsed.catalogVersion === CURRENT_CATALOG_VERSION &&
+          Array.isArray(parsed.equipment) &&
+          Array.isArray(parsed.users)
+        ) {
+          if (!Array.isArray(parsed.authorizedAdmins)) {
+            parsed.authorizedAdmins = parsed.users
+              .filter((u) => u.role === 'admin')
+              .map((u) => ({
+                email: u.email.toLowerCase(),
+                name: u.name,
+                grantedBy: 'System Setup',
+                createdAt: new Date().toISOString(),
+              }));
+          }
+          if (!Array.isArray(parsed.accessRequests)) {
+            parsed.accessRequests = [];
+          }
           return parsed;
         }
       }
     } catch {
-      // Fallback to fresh seed if file corrupt
+      // Fallback to fresh seed if file corrupt or outdated schema
     }
     const seed = createInitialSeed();
     this.persistSync(seed);
@@ -1006,30 +1419,179 @@ class LabLinkStore {
     return rest;
   }
 
+  public getAuthorizedAdmins() {
+    return this.db.authorizedAdmins;
+  }
+
+  public isAuthorizedAdmin(email: string): boolean {
+    const normalized = email.trim().toLowerCase();
+    const envAdmin = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+    if (envAdmin && normalized === envAdmin) return true;
+    return this.db.authorizedAdmins.some((a) => a.email.toLowerCase() === normalized);
+  }
+
+  public isAdminClaimRequired(): boolean {
+    if (process.env.ADMIN_INITIAL_PASSWORD && process.env.ADMIN_INITIAL_PASSWORD.trim().length > 0) {
+      return false;
+    }
+    return !this.db.users.some((u) => u.role === 'admin' && Boolean(u.passwordHash));
+  }
+
+  public claimInitialAdmin(email: string, name: string, password: string): UserProfile {
+    if (!this.isAdminClaimRequired()) {
+      throw new Error('Admin account has already been set up. Please sign in with your admin credentials.');
+    }
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !password || password.length < 8) {
+      throw new Error('Provide a valid admin email and a password of at least 8 characters.');
+    }
+    const existingAdmin = this.db.users.find((u) => u.role === 'admin');
+    const hashed = hashPassword(password);
+    let target: StoredUser;
+    if (existingAdmin) {
+      existingAdmin.email = normalizedEmail;
+      existingAdmin.name = name.trim() || existingAdmin.name;
+      existingAdmin.passwordHash = hashed;
+      target = existingAdmin;
+    } else {
+      target = {
+        id: `usr-admin-${Date.now()}`,
+        email: normalizedEmail,
+        name: name.trim() || 'Platform Administrator',
+        role: 'admin',
+        department: 'Campus Lab Operations',
+        title: 'Platform Administrator',
+        weeklyQuotaHours: 40,
+        usedHoursThisWeek: 0,
+        certifications: ['System Administrator', 'Safety Officer'],
+        passwordHash: hashed,
+      };
+      this.db.users.push(target);
+    }
+
+    this.db.authorizedAdmins = [
+      {
+        email: normalizedEmail,
+        name: target.name,
+        grantedBy: 'Initial Setup',
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    this.enqueuePersist();
+    return this.toPublicUser(target);
+  }
+
+  public verifyAdminCredentials(email: string, password: string): UserProfile | null {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!this.isAuthorizedAdmin(normalizedEmail)) {
+      return null;
+    }
+    const user = this.findUserByEmail(normalizedEmail);
+    const envPass = process.env.ADMIN_INITIAL_PASSWORD?.trim();
+    if (envPass && envPass.length > 0 && password === envPass) {
+      if (user) {
+        user.role = 'admin';
+        return this.toPublicUser(user);
+      }
+      const created: StoredUser = {
+        id: `usr-admin-${Date.now()}`,
+        email: normalizedEmail,
+        name: 'Platform Administrator',
+        role: 'admin',
+        department: 'Campus Lab Operations',
+        title: 'Platform Administrator',
+        weeklyQuotaHours: 40,
+        usedHoursThisWeek: 0,
+        certifications: ['System Administrator'],
+        passwordHash: hashPassword(envPass),
+      };
+      this.db.users.push(created);
+      this.enqueuePersist();
+      return this.toPublicUser(created);
+    }
+    if (!user || user.role !== 'admin' || !user.passwordHash) {
+      return null;
+    }
+    if (verifyPassword(password, user.passwordHash)) {
+      return this.toPublicUser(user);
+    }
+    return null;
+  }
+
+  public grantAuthorizedAdmin(email: string, name: string, grantedBy: string) {
+    const normalized = email.trim().toLowerCase();
+    if (!this.db.authorizedAdmins.some((a) => a.email.toLowerCase() === normalized)) {
+      this.db.authorizedAdmins.push({
+        email: normalized,
+        name: name.trim() || normalized,
+        grantedBy,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    const user = this.findUserByEmail(normalized);
+    if (user) {
+      user.role = 'admin';
+    }
+    this.enqueuePersist();
+    return this.db.authorizedAdmins;
+  }
+
+  public revokeAuthorizedAdmin(email: string, actorEmail: string) {
+    const normalized = email.trim().toLowerCase();
+    if (normalized === actorEmail.trim().toLowerCase()) {
+      throw new Error('You cannot remove your own admin access.');
+    }
+    if (this.db.authorizedAdmins.length <= 1) {
+      throw new Error('At least one authorized administrator must remain active.');
+    }
+    this.db.authorizedAdmins = this.db.authorizedAdmins.filter(
+      (a) => a.email.toLowerCase() !== normalized,
+    );
+    const user = this.findUserByEmail(normalized);
+    if (user && user.role === 'admin') {
+      user.role = 'faculty';
+    }
+    this.enqueuePersist();
+    return this.db.authorizedAdmins;
+  }
+
   public createUser(input: {
     email: string;
     name: string;
     password: string;
     department: string;
     role?: UserRole;
+    requestFaculty?: boolean;
   }): UserProfile {
     const existing = this.findUserByEmail(input.email);
     if (existing) {
       throw new Error('An account with that university email already exists.');
     }
+    // Public registration can never create an admin or auto-approve faculty directly
+    const safeRole: UserRole = input.role === 'faculty' ? 'faculty' : 'student';
+    const facultyApprovalStatus: UserProfile['facultyApprovalStatus'] =
+      safeRole === 'faculty'
+        ? 'approved'
+        : input.requestFaculty
+          ? 'pending'
+          : 'none';
     const newUser: StoredUser = {
       id: `usr-${Date.now()}`,
       email: input.email.trim().toLowerCase(),
       name: input.name.trim(),
-      role: input.role || 'student',
+      role: safeRole,
+      facultyApprovalStatus,
       department: input.department.trim() || 'Bioengineering',
       title:
-        input.role === 'faculty'
-          ? `Faculty Investigator • ${input.department}`
-          : `Researcher • ${input.department}`,
-      weeklyQuotaHours: 6,
+        safeRole === 'faculty'
+          ? `Faculty Member • ${input.department}`
+          : facultyApprovalStatus === 'pending'
+            ? `Faculty Applicant • ${input.department}`
+            : `Student • ${input.department}`,
+      weeklyQuotaHours: safeRole === 'faculty' ? 20 : 6,
       usedHoursThisWeek: 0,
       certifications: ['General Lab Safety'],
+      assignedLabIds: safeRole === 'faculty' ? ['lab-electronics', 'lab-workshop'] : undefined,
       passwordHash: hashPassword(input.password),
     };
     this.db.users.push(newUser);
@@ -1037,10 +1599,77 @@ class LabLinkStore {
     return this.toPublicUser(newUser);
   }
 
+  public updateProfile(
+    userId: string,
+    patch: { name?: string; department?: string; title?: string },
+  ): UserProfile {
+    const user = this.findUserById(userId);
+    if (!user) throw new Error('User not found.');
+    if (patch.name && patch.name.trim()) user.name = patch.name.trim();
+    if (patch.department && patch.department.trim()) user.department = patch.department.trim();
+    if (patch.title && patch.title.trim()) user.title = patch.title.trim();
+    this.enqueuePersist();
+    return this.toPublicUser(user);
+  }
+
+  public decideFacultyRequest(params: {
+    userId: string;
+    decision: 'approved' | 'rejected';
+    assignedLabIds?: string[];
+    reviewerName: string;
+  }): UserProfile {
+    const user = this.findUserById(params.userId);
+    if (!user) throw new Error('Applicant user not found.');
+    const approved = params.decision === 'approved';
+    user.facultyApprovalStatus = params.decision;
+    user.role = approved ? 'faculty' : 'student';
+    user.weeklyQuotaHours = approved ? 20 : 6;
+    user.assignedLabIds = approved
+      ? params.assignedLabIds && params.assignedLabIds.length > 0
+        ? params.assignedLabIds
+        : this.db.laboratories.map((l) => l.id)
+      : [];
+    user.title = approved ? `Faculty Lead • ${user.department}` : `Student • ${user.department}`;
+    if (approved && !user.certifications.includes('Faculty Approver')) {
+      user.certifications.push('Faculty Approver');
+    }
+    this.db.notifications.unshift({
+      id: `ntf-${Date.now()}`,
+      userId: user.id,
+      title: approved ? 'Faculty Account Approved' : 'Faculty Request Declined',
+      message: approved
+        ? `Your faculty permissions were approved by ${params.reviewerName}.`
+        : `Your faculty account request was declined by ${params.reviewerName}.`,
+      type: approved ? 'confirmed' : 'warning',
+      read: false,
+      createdAt: new Date().toISOString(),
+    });
+    this.enqueuePersist();
+    return this.toPublicUser(user);
+  }
+
   public updateUserRole(userId: string, role: UserRole): UserProfile {
     const user = this.findUserById(userId);
     if (!user) throw new Error('User not found.');
+    if (role === 'admin') {
+      if (!this.isAuthorizedAdmin(user.email)) {
+        this.db.authorizedAdmins.push({
+          email: user.email.toLowerCase(),
+          name: user.name,
+          grantedBy: 'Administrator',
+          createdAt: new Date().toISOString(),
+        });
+      }
+    } else if (user.role === 'admin') {
+      this.db.authorizedAdmins = this.db.authorizedAdmins.filter(
+        (a) => a.email.toLowerCase() !== user.email.toLowerCase(),
+      );
+    }
     user.role = role;
+    if (role === 'faculty') {
+      user.facultyApprovalStatus = 'approved';
+      user.weeklyQuotaHours = 20;
+    }
     this.enqueuePersist();
     return this.toPublicUser(user);
   }
@@ -1051,6 +1680,28 @@ class LabLinkStore {
     user.certifications = certifications;
     this.enqueuePersist();
     return this.toPublicUser(user);
+  }
+
+  public assertFacultyScopeForEquipment(
+    actorId: string,
+    actorRole: UserRole,
+    equipmentId: string,
+  ): Equipment {
+    const eq = this.getEquipmentById(equipmentId);
+    if (!eq) throw new Error('Equipment not found.');
+    if (actorRole === 'admin') return eq;
+    if (actorRole !== 'faculty') {
+      throw new Error('Faculty or admin permissions required.');
+    }
+    const faculty = this.findUserById(actorId);
+    if (
+      faculty?.assignedLabIds &&
+      faculty.assignedLabIds.length > 0 &&
+      !faculty.assignedLabIds.includes(eq.laboratoryId)
+    ) {
+      throw new Error('Faculty members can only manage equipment and approvals in their assigned labs.');
+    }
+    return eq;
   }
 
   public getDepartments(): Department[] {
@@ -1096,6 +1747,42 @@ class LabLinkStore {
     return created;
   }
 
+  public updateEquipment(
+    id: string,
+    patch: Partial<
+      Pick<
+        Equipment,
+        | 'name'
+        | 'category'
+        | 'departmentId'
+        | 'departmentName'
+        | 'laboratoryId'
+        | 'locationLabel'
+        | 'hourlyRate'
+        | 'requiresFacultyApproval'
+        | 'certificationRequired'
+        | 'description'
+        | 'specsPreview'
+        | 'status'
+      >
+    >,
+  ): Equipment {
+    const item = this.getEquipmentById(id);
+    if (!item) throw new Error('Equipment not found.');
+    Object.assign(item, patch);
+    this.enqueuePersist();
+    return item;
+  }
+
+  public deleteEquipment(id: string): void {
+    const idx = this.db.equipment.findIndex((e) => e.id === id);
+    if (idx === -1) throw new Error('Equipment not found.');
+    const [removed] = this.db.equipment.splice(idx, 1);
+    const dept = this.db.departments.find((d) => d.id === removed.departmentId);
+    if (dept && dept.instrumentCount > 0) dept.instrumentCount -= 1;
+    this.enqueuePersist();
+  }
+
   public updateEquipmentStatus(id: string, status: Equipment['status']): Equipment {
     const item = this.getEquipmentById(id);
     if (!item) throw new Error('Equipment not found.');
@@ -1105,10 +1792,11 @@ class LabLinkStore {
   }
 
   public getProjects(userId?: string, role?: UserRole): ResearchProject[] {
-    if (!userId || role === 'faculty' || role === 'admin') {
+    if (!userId) return [];
+    if (role === 'faculty' || role === 'admin') {
       return this.db.projects;
     }
-    return this.db.projects.filter((p) => p.ownerId === userId || p.ownerId === 'usr-alex');
+    return this.db.projects.filter((p) => p.ownerId === userId);
   }
 
   public createProject(input: Omit<ResearchProject, 'id'>): ResearchProject {
@@ -1121,7 +1809,131 @@ class LabLinkStore {
     return created;
   }
 
-  public getBookings(): Booking[] {
+  public getAccessRequests(actorId?: string, actorRole?: UserRole): AccessRequest[] {
+    if (!actorId || !actorRole) return [];
+    if (actorRole === 'student') {
+      return this.db.accessRequests.filter((r) => r.userId === actorId);
+    }
+    if (actorRole === 'faculty') {
+      const faculty = this.findUserById(actorId);
+      if (faculty?.assignedLabIds && faculty.assignedLabIds.length > 0) {
+        const labSet = new Set(faculty.assignedLabIds);
+        return this.db.accessRequests.filter((r) => {
+          const eq = this.getEquipmentById(r.equipmentId);
+          return eq ? labSet.has(eq.laboratoryId) : false;
+        });
+      }
+    }
+    return this.db.accessRequests;
+  }
+
+  public createAccessRequest(input: {
+    userId: string;
+    projectId: string;
+    equipmentId: string;
+    requestedHours: number;
+    preferredDate: string;
+    justification: string;
+  }): AccessRequest {
+    const project = this.db.projects.find((p) => p.id === input.projectId);
+    if (!project) throw new Error('Project not found.');
+    if (project.ownerId !== input.userId) {
+      throw new Error('You can only request access for your own projects.');
+    }
+    const equipment = this.getEquipmentById(input.equipmentId);
+    if (!equipment) throw new Error('Equipment not found.');
+    const user = this.findUserById(input.userId);
+    if (!user) throw new Error('User not found.');
+
+    const created: AccessRequest = {
+      id: `ar-${Date.now()}`,
+      projectId: project.id,
+      projectTitle: project.title,
+      userId: user.id,
+      userName: user.name,
+      userDepartment: user.department,
+      equipmentId: equipment.id,
+      equipmentName: equipment.name,
+      requestedHours: input.requestedHours,
+      preferredDate: input.preferredDate,
+      deadline: project.deadline,
+      justification: input.justification,
+      status: 'pending' as AccessRequestStatus,
+      createdAt: new Date().toISOString(),
+    };
+    this.db.accessRequests.unshift(created);
+    this.enqueuePersist();
+    return created;
+  }
+
+  public decideAccessRequest(params: {
+    requestId: string;
+    actorId: string;
+    actorRole: UserRole;
+    actorName: string;
+    decision: 'approved' | 'rejected' | 'alternative_suggested';
+    reviewerNotes?: string;
+    alternative?: AccessRequest['suggestedAlternative'];
+  }): AccessRequest {
+    const reqItem = this.db.accessRequests.find((r) => r.id === params.requestId);
+    if (!reqItem) throw new Error('Access request not found.');
+    this.assertFacultyScopeForEquipment(params.actorId, params.actorRole, reqItem.equipmentId);
+
+    reqItem.status = params.decision;
+    reqItem.facultyReviewerName = params.actorName;
+    if (params.reviewerNotes) reqItem.reviewerNotes = params.reviewerNotes;
+    if (params.alternative) reqItem.suggestedAlternative = params.alternative;
+
+    this.db.notifications.unshift({
+      id: `ntf-${Date.now()}`,
+      userId: reqItem.userId,
+      title:
+        params.decision === 'approved'
+          ? 'Project Access Approved'
+          : params.decision === 'alternative_suggested'
+            ? 'Alternative Suggested for Project Access'
+            : 'Project Access Declined',
+      message: `${reqItem.equipmentName} request reviewed by ${params.actorName}.`,
+      type:
+        params.decision === 'approved'
+          ? 'confirmed'
+          : params.decision === 'rejected'
+            ? 'warning'
+            : 'ai',
+      read: false,
+      createdAt: new Date().toISOString(),
+    });
+    this.enqueuePersist();
+    return reqItem;
+  }
+
+  public getBusySlots(): BusySlot[] {
+    return this.db.bookings
+      .filter((b) => b.status === 'confirmed' || b.status === 'pending')
+      .map((b) => ({
+        equipmentId: b.equipmentId,
+        date: b.date,
+        startHour: b.startHour,
+        durationHours: b.durationHours,
+        status: b.status === 'confirmed' ? 'confirmed' : 'pending',
+      }));
+  }
+
+  public getBookings(actorId?: string, actorRole?: UserRole): Booking[] {
+    if (!actorId || !actorRole) return [];
+    if (actorRole === 'student') {
+      return this.db.bookings.filter((b) => b.userId === actorId);
+    }
+    if (actorRole === 'faculty') {
+      const faculty = this.findUserById(actorId);
+      if (faculty?.assignedLabIds && faculty.assignedLabIds.length > 0) {
+        const labSet = new Set(faculty.assignedLabIds);
+        return this.db.bookings.filter((b) => {
+          const eq = this.getEquipmentById(b.equipmentId);
+          return eq ? labSet.has(eq.laboratoryId) : false;
+        });
+      }
+    }
     return this.db.bookings;
   }
 
@@ -1150,7 +1962,12 @@ class LabLinkStore {
     startHour: number;
     durationHours: number;
     submitToFairSlotOnConflict?: boolean;
-  }): { booking?: Booking; conflictCase?: FairSlotConflictCase; conflictError?: string } {
+  }): {
+    booking?: Booking;
+    conflictCase?: FairSlotConflictCase;
+    conflictError?: string;
+    suggestedAlternative?: FairSlotConflictCase['alternatives'][number];
+  } {
     const equipment = this.getEquipmentById(input.equipmentId);
     if (!equipment) {
       throw new Error('Selected equipment was not found.');
@@ -1177,140 +1994,50 @@ class LabLinkStore {
     if (conflicts.length > 0) {
       const existing = conflicts[0];
       if (!input.submitToFairSlotOnConflict) {
+        const realAlts = findRealAlternativeSlots({
+          targetEquipment: equipment,
+          allEquipment: this.db.equipment,
+          activeBookings: this.db.bookings,
+          date: input.date,
+          requestedStartHour: input.startHour,
+          durationHours: input.durationHours,
+          deadlineIso: project?.deadline,
+        });
+        const bestAlt = realAlts[0];
         return {
-          conflictError: `Time slot ${input.startHour}:00–${input.startHour + input.durationHours}:00 on ${input.date} overlaps with an existing reservation (${existing.userName}). Submit to FairSlot AI arbitration or choose an open slot.`,
+          conflictError: `Time ${String(input.startHour).padStart(2, '0')}:00–${String(input.startHour + input.durationHours).padStart(2, '0')}:00 on ${input.date} overlaps with an existing reservation.${bestAlt ? ` Next open option: ${bestAlt.timeLabel} (${bestAlt.equipmentName}).` : ''} Send to Smart Booking or pick another open slot.`,
+          suggestedAlternative: bestAlt,
         };
       }
 
-      // Create a FairSlot conflict case for Faculty review (AI does not auto-override!)
-      const existingUser = this.findUserById(existing.userId);
+      const existingUser = this.findUserById(existing.userId) || {
+        id: existing.userId,
+        name: existing.userName,
+        title: existing.userRoleTitle,
+        weeklyQuotaHours: 6,
+        usedHoursThisWeek: 2,
+        certifications: ['General Lab Safety'],
+      };
+      const existingProj = existing.projectId
+        ? this.db.projects.find((p) => p.id === existing.projectId)
+        : undefined;
+
       const caseId = `fs-${Date.now().toString().slice(-4)}`;
-      const nextOpenHour = Math.min(18, existing.startHour + existing.durationHours);
-      const conflictCase: FairSlotConflictCase = {
-        id: caseId,
-        caseCode: `CASE #${caseId.toUpperCase()}`,
-        equipmentId: equipment.id,
-        equipmentName: equipment.name,
-        bayLabel: equipment.locationLabel,
+      const conflictCase = buildDeterministicConflictCase({
+        caseId,
+        equipment,
+        allEquipment: this.db.equipment,
+        allBookings: this.db.bookings,
         date: input.date,
         conflictStartHour: input.startHour,
-        conflictEndHour: input.startHour + input.durationHours,
-        status: 'open',
-        fairnessScore: 91,
-        headlineRecommendation: `Keep ${existing.userName} at ${existing.startHour}:00 & schedule ${user.name} at ${nextOpenHour}:00`,
-        explanation: `${existing.userName} holds the earlier validated booking for ${existing.projectTitle}. Shifting ${user.name} to ${nextOpenHour}:00 preserves calibration continuity and avoids double-booking.`,
-        candidates: [
-          {
-            bookingId: existing.id,
-            studentId: existing.userId,
-            studentName: existing.userName,
-            studentInitials: existing.userName
-              .split(' ')
-              .map((n) => n[0])
-              .join('')
-              .slice(0, 2)
-              .toUpperCase(),
-            studentTitle: existing.userRoleTitle,
-            projectTitle: existing.projectTitle,
-            deadlineDescription: 'Active scheduled experiment window.',
-            hoursUntilDeadline: 24,
-            priorityScore: 88,
-            weeklyUsedHours: existingUser?.usedHoursThisWeek ?? 2,
-            weeklyQuotaHours: existingUser?.weeklyQuotaHours ?? 6,
-            requestedStartHour: existing.startHour,
-            requestedDurationHours: existing.durationHours,
-            recommended: true,
-          },
-          {
-            bookingId: `bk-req-${Date.now()}`,
-            studentId: user.id,
-            studentName: user.name,
-            studentInitials: user.name
-              .split(' ')
-              .map((n) => n[0])
-              .join('')
-              .slice(0, 2)
-              .toUpperCase(),
-            studentTitle: user.title,
-            projectTitle,
-            deadlineDescription: project ? `Project deadline: ${project.deadline}` : 'Flexible milestone.',
-            hoursUntilDeadline: 72,
-            priorityScore: 76,
-            weeklyUsedHours: user.usedHoursThisWeek,
-            weeklyQuotaHours: user.weeklyQuotaHours,
-            requestedStartHour: input.startHour,
-            requestedDurationHours: input.durationHours,
-            recommended: false,
-          },
-        ],
-        factors: [
-          {
-            title: 'Booking Precedence',
-            icon: 'schedule',
-            tone: 'mint',
-            detail: `${existing.userName} reserved this window first with validated prerequisites.`,
-          },
-          {
-            title: 'Quota Equity',
-            icon: 'balance',
-            tone: 'blue',
-            detail: `${user.name} has ${(user.weeklyQuotaHours - user.usedHoursThisWeek).toFixed(1)}h remaining this week.`,
-          },
-          {
-            title: 'Feasible Shift',
-            icon: 'tune',
-            tone: 'pink',
-            detail: `${nextOpenHour}:00 slot on the same date has zero instrument conflicts.`,
-          },
-        ],
-        alternatives: [
-          {
-            id: 'alt-next',
-            badge: 'Best Match',
-            score: 94,
-            timeLabel: `${input.date}, ${String(nextOpenHour).padStart(2, '0')}:00 – ${String(nextOpenHour + input.durationHours).padStart(2, '0')}:00`,
-            date: input.date,
-            startHour: nextOpenHour,
-            durationHours: input.durationHours,
-            equipmentId: equipment.id,
-            equipmentName: equipment.name,
-            bayLabel: equipment.locationLabel,
-            rationale: 'Same-day consecutive slot with zero setup overhead.',
-          },
-          {
-            id: 'alt-tomorrow',
-            badge: 'Next Morning',
-            score: 86,
-            timeLabel: `${getTodayDateString(1)}, 09:00 – ${String(9 + input.durationHours).padStart(2, '0')}:00`,
-            date: getTodayDateString(1),
-            startHour: 9,
-            durationHours: input.durationHours,
-            equipmentId: equipment.id,
-            equipmentName: equipment.name,
-            bayLabel: equipment.locationLabel,
-            rationale: 'Clean morning calibration block.',
-          },
-        ],
-        timelineBlocks: [
-          { hourLabel: '08:00', startHour: 8, label: 'Open', kind: 'open' },
-          { hourLabel: '10:00', startHour: 10, label: 'Open', kind: 'open' },
-          { hourLabel: '12:00', startHour: 12, label: 'Open', kind: 'open' },
-          {
-            hourLabel: `${String(input.startHour).padStart(2, '0')}:00`,
-            startHour: input.startHour,
-            label: 'Conflict (2)',
-            kind: 'conflict',
-          },
-          {
-            hourLabel: `${String(nextOpenHour).padStart(2, '0')}:00`,
-            startHour: nextOpenHour,
-            label: `${user.name.split(' ')[0]} (AI)`,
-            kind: 'ai_suggested',
-          },
-          { hourLabel: '18:00', startHour: 18, label: 'Open', kind: 'open' },
-        ],
-        selectedAlternativeId: 'alt-next',
-      };
+        conflictDurationHours: input.durationHours,
+        existingBooking: existing,
+        existingUser,
+        existingProject: existingProj,
+        incomingUser: user,
+        incomingProject: project,
+        incomingProjectTitleFallback: projectTitle,
+      });
 
       this.db.conflicts.unshift(conflictCase);
       this.enqueuePersist();
@@ -1363,9 +2090,15 @@ class LabLinkStore {
     decision: 'confirmed' | 'rejected' | 'alternative_suggested',
     reviewerName: string,
     alternative?: Booking['suggestedAlternative'],
+    actorId?: string,
+    actorRole?: UserRole,
   ): Booking {
     const booking = this.db.bookings.find((b) => b.id === bookingId);
     if (!booking) throw new Error('Booking request not found.');
+
+    if (actorId && actorRole) {
+      this.assertFacultyScopeForEquipment(actorId, actorRole, booking.equipmentId);
+    }
 
     if (decision === 'confirmed') {
       const conflicts = this.findConflictingBookings(
@@ -1377,7 +2110,7 @@ class LabLinkStore {
       );
       if (conflicts.length > 0) {
         throw new Error(
-          `Cannot approve: overlaps with confirmed booking by ${conflicts[0].userName}. Use FairSlot or suggest an alternative slot.`,
+          `Cannot approve: overlaps with confirmed booking by ${conflicts[0].userName}. Use Smart Booking or suggest an alternative slot.`,
         );
       }
     }
@@ -1410,16 +2143,37 @@ class LabLinkStore {
   public cancelBooking(bookingId: string, actorUserId: string, actorRole: UserRole): Booking {
     const booking = this.db.bookings.find((b) => b.id === bookingId);
     if (!booking) throw new Error('Booking not found.');
-    if (booking.userId !== actorUserId && actorRole !== 'admin' && actorRole !== 'faculty') {
-      throw new Error('You may only cancel your own reservations.');
+    if (booking.userId !== actorUserId && actorRole !== 'admin') {
+      if (actorRole === 'faculty') {
+        this.assertFacultyScopeForEquipment(actorUserId, actorRole, booking.equipmentId);
+      } else {
+        throw new Error('You may only cancel your own reservations.');
+      }
     }
     booking.status = 'cancelled';
+    const usr = this.findUserById(booking.userId);
+    if (usr) {
+      usr.usedHoursThisWeek = Math.max(0, usr.usedHoursThisWeek - booking.durationHours);
+    }
     this.enqueuePersist();
     return booking;
   }
 
-  public getConflicts(): FairSlotConflictCase[] {
-    return this.db.conflicts;
+  public getConflicts(actorId?: string, actorRole?: UserRole): FairSlotConflictCase[] {
+    if (!actorId || !actorRole) return [];
+    if (actorRole === 'admin') return this.db.conflicts;
+    if (actorRole === 'faculty') {
+      const faculty = this.findUserById(actorId);
+      if (faculty?.assignedLabIds && faculty.assignedLabIds.length > 0) {
+        const labSet = new Set(faculty.assignedLabIds);
+        return this.db.conflicts.filter((c) => {
+          const eq = this.getEquipmentById(c.equipmentId);
+          return eq ? labSet.has(eq.laboratoryId) : false;
+        });
+      }
+      return this.db.conflicts;
+    }
+    return this.db.conflicts.filter((c) => c.candidates.some((cand) => cand.studentId === actorId));
   }
 
   public resolveConflict(
@@ -1427,18 +2181,18 @@ class LabLinkStore {
     mode: 'resolved_ai' | 'overridden_faculty',
     alternativeId: string | undefined,
     reviewerName: string,
+    actorId?: string,
+    actorRole?: UserRole,
   ): { conflict: FairSlotConflictCase; createdBooking?: Booking } {
     const conflict = this.db.conflicts.find((c) => c.id === conflictId);
-    if (!conflict) throw new Error('FairSlot conflict case not found.');
+    if (!conflict) throw new Error('Smart Booking conflict case not found.');
+
+    if (actorId && actorRole) {
+      this.assertFacultyScopeForEquipment(actorId, actorRole, conflict.equipmentId);
+    }
 
     const chosenAlt =
       conflict.alternatives.find((a) => a.id === alternativeId) || conflict.alternatives[0];
-    conflict.status = mode;
-    conflict.resolvedBy = reviewerName;
-    if (chosenAlt) {
-      conflict.selectedAlternativeId = chosenAlt.id;
-    }
-
     const displacedCandidate = conflict.candidates[1];
     let createdBooking: Booking | undefined;
     if (chosenAlt && displacedCandidate) {
@@ -1448,27 +2202,46 @@ class LabLinkStore {
         chosenAlt.startHour,
         chosenAlt.durationHours,
       );
-      if (overlaps.length === 0) {
-        createdBooking = {
-          id: `bk-fs-${Date.now()}`,
-          equipmentId: chosenAlt.equipmentId,
-          equipmentName: chosenAlt.equipmentName,
-          userId: displacedCandidate.studentId,
-          userName: displacedCandidate.studentName,
-          userRoleTitle: displacedCandidate.studentTitle,
-          projectId: 'proj-spectroscopy',
-          projectTitle: displacedCandidate.projectTitle,
-          date: chosenAlt.date,
-          startHour: chosenAlt.startHour,
-          durationHours: chosenAlt.durationHours,
-          status: 'confirmed',
-          totalCost: 96,
-          facultyReviewerName: reviewerName,
-          aiNote: `Resolved via FairSlot (${mode === 'resolved_ai' ? 'AI Plan Approved' : 'Faculty Override'}).`,
-          createdAt: new Date().toISOString(),
-        };
-        this.db.bookings.unshift(createdBooking);
+      if (overlaps.length > 0) {
+        throw new Error(
+          `Alternative slot ${chosenAlt.timeLabel} is no longer free. Please choose another slot.`,
+        );
       }
+      const targetEq = this.getEquipmentById(chosenAlt.equipmentId);
+      createdBooking = {
+        id: `bk-fs-${Date.now()}`,
+        equipmentId: chosenAlt.equipmentId,
+        equipmentName: chosenAlt.equipmentName,
+        userId: displacedCandidate.studentId,
+        userName: displacedCandidate.studentName,
+        userRoleTitle: displacedCandidate.studentTitle,
+        projectId: displacedCandidate.projectId || '',
+        projectTitle: displacedCandidate.projectTitle,
+        date: chosenAlt.date,
+        startHour: chosenAlt.startHour,
+        durationHours: chosenAlt.durationHours,
+        status: 'confirmed',
+        totalCost: (targetEq?.hourlyRate || 20) * chosenAlt.durationHours,
+        facultyReviewerName: reviewerName,
+        aiNote: `Resolved via Smart Booking (${mode === 'resolved_ai' ? 'Smart Plan Approved' : 'Faculty Override'}).`,
+        createdAt: new Date().toISOString(),
+      };
+      this.db.bookings.unshift(createdBooking);
+      this.db.notifications.unshift({
+        id: `ntf-${Date.now()}`,
+        userId: displacedCandidate.studentId,
+        title: 'New Booking Slot Confirmed',
+        message: `${chosenAlt.equipmentName} scheduled for ${chosenAlt.timeLabel} by ${reviewerName}.`,
+        type: 'confirmed',
+        read: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    conflict.status = mode;
+    conflict.resolvedBy = reviewerName;
+    if (chosenAlt) {
+      conflict.selectedAlternativeId = chosenAlt.id;
     }
 
     this.enqueuePersist();
@@ -1494,7 +2267,7 @@ class LabLinkStore {
   }
 
   public getNotifications(userId: string): AppNotification[] {
-    return this.db.notifications.filter((n) => n.userId === userId || n.userId === 'usr-alex');
+    return this.db.notifications.filter((n) => n.userId === userId);
   }
 
   public markNotificationRead(id: string): void {
@@ -1506,29 +2279,11 @@ class LabLinkStore {
   }
 
   public getAnalytics(): UtilizationAnalytics {
-    const totalInstruments = this.db.equipment.length;
-    const onlineInstruments = this.db.equipment.filter((e) => e.status !== 'maintenance').length;
-    return {
-      peakCapacityPercent: 84.2,
-      deltaVsLastWeek: '+6.4% vs last wk',
-      weeklyBars: [
-        { day: 'Mon', percent: 62 },
-        { day: 'Tue', percent: 77 },
-        { day: 'Wed', percent: 85, isPeak: true },
-        { day: 'Thu', percent: 72 },
-        { day: 'Fri', percent: 67 },
-        { day: 'Sat', percent: 38 },
-        { day: 'Sun', percent: 28 },
-      ],
-      zoneSplit: [
-        { zone: 'Imaging', percent: 45, color: '#a8e8d5' },
-        { zone: 'Spectroscopy', percent: 32, color: '#b0e4fd' },
-        { zone: 'Wet Labs', percent: 23, color: '#ffcfd9' },
-      ],
-      onlineInstruments,
-      totalInstruments,
-      uptimePercent: 98.4,
-    };
+    return computeRealUtilizationAnalytics({
+      equipment: this.db.equipment,
+      bookings: this.db.bookings,
+      maintenance: this.db.maintenance,
+    });
   }
 }
 

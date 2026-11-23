@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import type { UserProfile, UserRole } from '../../types/lablink';
+import type { UserProfile } from '../../types/lablink';
 import { api, setAuthToken } from '../../lib/api';
+import { isSupabaseClientConfigured, supabase } from '../../lib/supabase';
 import { ClayModal, TactileButton } from '../motion/MotionPrimitives';
 
 interface AuthModalProps {
@@ -15,38 +16,51 @@ export const AuthModal: React.FC<AuthModalProps> = ({ open, onClose, onAuthentic
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [department, setDepartment] = useState('Bioengineering');
+  const [requestFaculty, setRequestFaculty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setNotice(null);
     setLoading(true);
     try {
       const res =
         mode === 'signin'
-          ? await api.login(email, password)
-          : await api.register({ email, name, password, department });
-      setAuthToken(res.token);
-      onAuthenticated(res.user);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Authentication failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
+          ? await api.login(email.trim(), password)
+          : await api.register({
+              email: email.trim(),
+              name: name.trim(),
+              password,
+              department,
+              requestFaculty,
+            });
 
-  const handleQuickPersona = async (role: UserRole) => {
-    setError(null);
-    setLoading(true);
-    try {
-      const res = await api.demoSession(role);
+      if (!res.token) {
+        setNotice(
+          'Account created! Please check your email inbox to verify your address before signing in.',
+        );
+        setMode('signin');
+        return;
+      }
+
       setAuthToken(res.token);
+
+      if (isSupabaseClientConfigured && supabase && res.refreshToken) {
+        await supabase.auth
+          .setSession({
+            access_token: res.token,
+            refresh_token: res.refreshToken,
+          })
+          .catch(() => undefined);
+      }
+
       onAuthenticated(res.user);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not switch workspace session.');
+      setError(err instanceof Error ? err.message : 'Sign in failed.');
     } finally {
       setLoading(false);
     }
@@ -58,10 +72,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ open, onClose, onAuthentic
         <div className="flex items-start justify-between gap-3">
           <div>
             <span className="text-xs font-semibold uppercase tracking-wider text-[#29695a]">
-              Campus Credentials
+              University Account
             </span>
             <h3 className="text-2xl font-bold text-[#1d1c15] mt-0.5">
-              {mode === 'signin' ? 'Sign in to LabLink' : 'Create Researcher Account'}
+              {mode === 'signin' ? 'Sign in to LabLink' : 'Create University Account'}
             </h3>
           </div>
           <button
@@ -74,47 +88,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ open, onClose, onAuthentic
           </button>
         </div>
 
-        {/* Role-based Instant Workspace Switcher */}
-        <div className="bg-[#f8f3e8] rounded-2xl p-4 clay-well flex flex-col gap-2.5">
-          <p className="text-xs font-semibold text-[#3f4945]">
-            Quick Workspace Access (Server-Verified Session)
-          </p>
-          <div className="grid grid-cols-3 gap-2">
-            <TactileButton
-              variant="primary"
-              type="button"
-              disabled={loading}
-              onClick={() => handleQuickPersona('student')}
-              className="py-2 px-3 text-xs"
-            >
-              Student
-            </TactileButton>
-            <TactileButton
-              variant="secondary"
-              type="button"
-              disabled={loading}
-              onClick={() => handleQuickPersona('faculty')}
-              className="py-2 px-3 text-xs"
-            >
-              Faculty PI
-            </TactileButton>
-            <TactileButton
-              variant="soft"
-              type="button"
-              disabled={loading}
-              onClick={() => handleQuickPersona('admin')}
-              className="py-2 px-3 text-xs"
-            >
-              Admin
-            </TactileButton>
+        {notice && (
+          <div className="rounded-2xl bg-[#a8e8d5]/55 text-[#2b6a5b] px-4 py-3 text-xs font-semibold">
+            {notice}
           </div>
-        </div>
-
-        <div className="flex items-center gap-3 text-xs text-[#707975]">
-          <div className="flex-1 h-px bg-[#e7e2d7]" />
-          <span>or use university email</span>
-          <div className="flex-1 h-px bg-[#e7e2d7]" />
-        </div>
+        )}
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
           {mode === 'register' && (
@@ -126,7 +104,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ open, onClose, onAuthentic
                   required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Dr. / Student Name"
+                  placeholder="Your full name"
                   className="w-full rounded-full bg-[#f8f3e8] px-4 py-2.5 text-sm text-[#1d1c15] clay-well focus:outline-none focus:ring-2 focus:ring-[#29695a]"
                 />
               </div>
@@ -141,6 +119,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ open, onClose, onAuthentic
                   <option value="Robotics & ECE">Robotics & ECE</option>
                   <option value="Materials & Chem">Materials & Chem</option>
                   <option value="Rapid Prototyping">Rapid Prototyping</option>
+                  <option value="Mechanical Engineering">Mechanical Engineering</option>
+                  <option value="Computer Science">Computer Science</option>
                 </select>
               </div>
             </>
@@ -155,7 +135,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ open, onClose, onAuthentic
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="alex.rivera@lablink.edu"
+              placeholder="you@university.edu"
               className="w-full rounded-full bg-[#f8f3e8] px-4 py-2.5 text-sm text-[#1d1c15] clay-well focus:outline-none focus:ring-2 focus:ring-[#29695a]"
             />
           </div>
@@ -168,10 +148,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({ open, onClose, onAuthentic
               minLength={6}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Minimum 6 characters"
+              placeholder="At least 6 characters"
               className="w-full rounded-full bg-[#f8f3e8] px-4 py-2.5 text-sm text-[#1d1c15] clay-well focus:outline-none focus:ring-2 focus:ring-[#29695a]"
             />
           </div>
+
+          {mode === 'register' && (
+            <label className="flex items-start gap-2.5 rounded-2xl bg-[#f8f3e8] p-3.5 text-xs text-[#1d1c15] cursor-pointer clay-well">
+              <input
+                type="checkbox"
+                checked={requestFaculty}
+                onChange={(e) => setRequestFaculty(e.target.checked)}
+                className="mt-0.5 rounded accent-[#29695a]"
+              />
+              <span>
+                <strong className="block text-[#29695a]">
+                  Request Faculty Account (Requires Admin Approval)
+                </strong>
+                <span className="text-[11px] text-[#3f4945]">
+                  New accounts start with Student access until an administrator approves your
+                  faculty status.
+                </span>
+              </span>
+            </label>
+          )}
 
           {error && (
             <div className="rounded-2xl bg-[#ffdad6] text-[#93000a] px-4 py-2.5 text-xs font-medium">
@@ -196,10 +196,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ open, onClose, onAuthentic
               onClick={() => {
                 setMode('register');
                 setError(null);
+                setNotice(null);
               }}
               className="font-semibold text-[#29695a] hover:underline cursor-pointer"
             >
-              New to campus labs? Create a student account
+              New to LabLink? Create an account
             </button>
           ) : (
             <button
@@ -207,6 +208,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ open, onClose, onAuthentic
               onClick={() => {
                 setMode('signin');
                 setError(null);
+                setNotice(null);
               }}
               className="font-semibold text-[#29695a] hover:underline cursor-pointer"
             >

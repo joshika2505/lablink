@@ -96,30 +96,30 @@ export const BookingConfirmationModal: React.FC<BookingConfirmationModalProps> =
 
         <div className="flex flex-col gap-1.5">
           <span className="text-xs font-semibold uppercase tracking-wider text-[#29695a]">
-            {isPending ? 'Request Queued for Faculty Review' : 'Reservation Confirmed'}
+            {isPending ? 'Waiting for Approval' : 'Booking Confirmed'}
           </span>
           <h3 className="text-2xl font-bold text-[#1d1c15]">{booking.equipmentName}</h3>
           <p className="text-sm text-[#3f4945]">
             {isPending
-              ? 'Your slot is held pending supervisor sign-off.'
-              : 'Your digital badge access has been synced for this window.'}
+              ? 'Your booking request has been sent for faculty approval.'
+              : 'Your lab access is ready for this time slot.'}
           </p>
         </div>
 
         {/* Summary Well */}
         <div className="w-full bg-[#f8f3e8] rounded-2xl p-4 clay-well flex flex-col gap-2.5 text-left">
           <div className="flex items-center justify-between text-sm">
-            <span className="text-[#3f4945]">Reserved Date</span>
+            <span className="text-[#3f4945]">Date</span>
             <span className="font-semibold text-[#1d1c15] tabular-nums">{booking.date}</span>
           </div>
           <div className="flex items-center justify-between text-sm">
-            <span className="text-[#3f4945]">Time Window</span>
+            <span className="text-[#3f4945]">Time Slot</span>
             <span className="font-semibold text-[#1d1c15] tabular-nums">
               {startLabel} – {endLabel} ({booking.durationHours}h)
             </span>
           </div>
           <div className="flex items-center justify-between text-sm">
-            <span className="text-[#3f4945]">Project / Grant</span>
+            <span className="text-[#3f4945]">Project</span>
             <span className="font-semibold text-[#1d1c15] truncate max-w-[220px]">
               {booking.projectTitle}
             </span>
@@ -133,14 +133,14 @@ export const BookingConfirmationModal: React.FC<BookingConfirmationModalProps> =
                   : 'bg-[#a8e8d5] text-[#2b6a5b]'
               }`}
             >
-              {isPending ? 'Pending Faculty Approval' : 'Confirmed'}
+              {isPending ? 'Waiting for Approval' : 'Confirmed'}
             </span>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center justify-center gap-3 w-full pt-1">
           <TactileButton variant="soft" onClick={onClose} className="px-6 py-2.5 text-sm">
-            Continue Browsing
+            Keep Browsing
           </TactileButton>
           <TactileButton
             variant="primary"
@@ -151,7 +151,7 @@ export const BookingConfirmationModal: React.FC<BookingConfirmationModalProps> =
             className="px-6 py-2.5 text-sm"
           >
             <span className="material-symbols-outlined text-[18px]">calendar_month</span>
-            <span>View My Reservations</span>
+            <span>Manage Bookings</span>
           </TactileButton>
         </div>
       </div>

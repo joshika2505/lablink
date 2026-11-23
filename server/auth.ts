@@ -1,12 +1,51 @@
 import crypto from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { UserProfile, UserRole } from '../src/types/lablink.js';
 
 const RUNTIME_FALLBACK_SECRET = crypto.randomBytes(32).toString('hex');
 
 function getSessionSecret(): string {
   return process.env.SESSION_SECRET || RUNTIME_FALLBACK_SECRET;
+}
+
+export function isSupabaseServerConfigured(): boolean {
+  const url = process.env.SUPABASE_URL?.trim() || '';
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || '';
+  return (
+    url.startsWith('https://') &&
+    !url.includes('MY_SUPABASE') &&
+    !url.includes('your-project') &&
+    serviceKey.length > 20 &&
+    !serviceKey.includes('MY_SUPABASE')
+  );
+}
+
+export function isSupabaseAuthReady(): boolean {
+  const viteUrl = process.env.VITE_SUPABASE_URL?.trim() || '';
+  const viteAnon = process.env.VITE_SUPABASE_ANON_KEY?.trim() || '';
+  return (
+    isSupabaseServerConfigured() &&
+    viteUrl.startsWith('https://') &&
+    !viteUrl.includes('MY_SUPABASE') &&
+    !viteUrl.includes('your-project') &&
+    viteAnon.length > 20 &&
+    !viteAnon.includes('MY_SUPABASE')
+  );
+}
+
+let cachedSupabaseAdmin: SupabaseClient | null = null;
+
+export function getSupabaseAdmin(): SupabaseClient | null {
+  if (!isSupabaseServerConfigured()) return null;
+  const url = process.env.SUPABASE_URL!.trim();
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!.trim();
+  if (!cachedSupabaseAdmin) {
+    cachedSupabaseAdmin = createClient(url, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+  return cachedSupabaseAdmin;
 }
 
 export function hashPassword(password: string): string {
@@ -16,6 +55,7 @@ export function hashPassword(password: string): string {
 }
 
 export function verifyPassword(password: string, storedHash: string): boolean {
+  if (!storedHash || !storedHash.includes(':')) return false;
   const [salt, originalHex] = storedHash.split(':');
   if (!salt || !originalHex) return false;
   const derived = crypto.scryptSync(password, salt, 64);
@@ -76,11 +116,6 @@ export interface AuthenticatedRequest extends Request {
   authUser?: TokenPayload;
 }
 
-const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
-const supabaseVerifier =
-  supabaseUrl && supabaseServiceKey ? createClient(supabaseUrl, supabaseServiceKey) : null;
-
 export async function resolveAuthFromRequest(req: Request): Promise<TokenPayload | null> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -92,16 +127,43 @@ export async function resolveAuthFromRequest(req: Request): Promise<TokenPayload
   const localPayload = verifySessionToken(token);
   if (localPayload) return localPayload;
 
-  if (supabaseVerifier) {
+  const supabaseAdmin = getSupabaseAdmin();
+  if (supabaseAdmin) {
     try {
-      const { data, error } = await supabaseVerifier.auth.getUser(token);
+      const { data, error } = await supabaseAdmin.auth.getUser(token);
       if (!error && data.user) {
-        const metaRole = (data.user.user_metadata?.role as UserRole | undefined) || 'student';
+        const userEmail = (data.user.email || '').toLowerCase();
+
+        // Always read authoritative role from database profiles + authorized_admins (never trust client metadata)
+        const { data: profileRow } = await supabaseAdmin
+          .from('profiles')
+          .select('role, full_name')
+          .eq('id', data.user.id)
+          .maybeSingle();
+
+        let authoritativeRole: UserRole =
+          profileRow?.role === 'faculty'
+            ? 'faculty'
+            : profileRow?.role === 'admin'
+              ? 'admin'
+              : 'student';
+
+        if (authoritativeRole === 'admin') {
+          const { data: adminRow } = await supabaseAdmin
+            .from('authorized_admins')
+            .select('email')
+            .ilike('email', userEmail)
+            .maybeSingle();
+          if (!adminRow) {
+            authoritativeRole = 'student';
+          }
+        }
+
         return {
           sub: data.user.id,
-          email: data.user.email || '',
-          role: metaRole,
-          name: (data.user.user_metadata?.full_name as string) || data.user.email || 'Researcher',
+          email: userEmail,
+          role: authoritativeRole,
+          name: profileRow?.full_name || data.user.email || 'Campus User',
           exp: Date.now() + 3600_000,
         };
       }
@@ -119,7 +181,7 @@ export async function requireAuth(
 ): Promise<void> {
   const user = await resolveAuthFromRequest(req);
   if (!user) {
-    res.status(401).json({ error: 'Authentication required. Please sign in to continue.' });
+    res.status(401).json({ error: 'Please sign in to continue.' });
     return;
   }
   req.authUser = user;
@@ -129,12 +191,12 @@ export async function requireAuth(
 export function requireRole(...allowedRoles: UserRole[]) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
     if (!req.authUser) {
-      res.status(401).json({ error: 'Authentication required.' });
+      res.status(401).json({ error: 'Please sign in to continue.' });
       return;
     }
     if (!allowedRoles.includes(req.authUser.role)) {
       res.status(403).json({
-        error: `Access restricted. This action requires ${allowedRoles.join(' or ')} permissions.`,
+        error: `Access denied. This action requires ${allowedRoles.join(' or ')} permissions.`,
       });
       return;
     }

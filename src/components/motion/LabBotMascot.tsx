@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useMotionValue, useSpring } from 'motion/react';
-import { SPRING_TACTILE } from './MotionPrimitives';
+import { SPRING_TACTILE, usePrefersReducedMotion } from './MotionPrimitives';
 
 interface LabBotMascotProps {
   size?: 'sm' | 'md' | 'lg';
@@ -12,10 +12,10 @@ interface LabBotMascotProps {
 }
 
 const GREETINGS = [
-  'Ready to reserve a lab bench?',
-  'Ask me to match your experiment!',
-  'FairSlot keeps bookings equitable.',
-  'All safety clearances synced!',
+  'Ready to book lab equipment?',
+  'Ask me to match your project!',
+  'Smart Booking keeps slots fair.',
+  'Safety training synced!',
 ];
 
 export const LabBotMascot: React.FC<LabBotMascotProps> = ({
@@ -26,6 +26,7 @@ export const LabBotMascot: React.FC<LabBotMascotProps> = ({
   onMascotClick,
   className = '',
 }) => {
+  const reduced = usePrefersReducedMotion();
   const rootRef = useRef<HTMLDivElement>(null);
   const [greetingIndex, setGreetingIndex] = useState(0);
   const [isWaving, setIsWaving] = useState(false);
@@ -41,10 +42,10 @@ export const LabBotMascot: React.FC<LabBotMascotProps> = ({
   const smoothTilt = useSpring(headTilt, { stiffness: 180, damping: 20 });
 
   useEffect(() => {
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    if (mq.matches) return;
+    if (reduced) return;
 
     const handlePointerMove = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') return;
       const el = rootRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
@@ -61,17 +62,21 @@ export const LabBotMascot: React.FC<LabBotMascotProps> = ({
 
     window.addEventListener('pointermove', handlePointerMove, { passive: true });
     return () => window.removeEventListener('pointermove', handlePointerMove);
-  }, [headTilt, pupilX, pupilY]);
+  }, [headTilt, pupilX, pupilY, reduced]);
 
   // Occasional natural idle blink
   useEffect(() => {
+    if (reduced) return;
+    let t: ReturnType<typeof setTimeout> | undefined;
     const interval = setInterval(() => {
       setBlinking(true);
-      const t = setTimeout(() => setBlinking(false), 160);
-      return () => clearTimeout(t);
+      t = setTimeout(() => setBlinking(false), 160);
     }, 4400);
-    return () => clearInterval(interval);
-  }, []);
+    return () => {
+      clearInterval(interval);
+      if (t) clearTimeout(t);
+    };
+  }, [reduced]);
 
   const triggerReaction = () => {
     setIsWaving(true);
@@ -84,7 +89,7 @@ export const LabBotMascot: React.FC<LabBotMascotProps> = ({
     size === 'sm' ? 'w-16 h-20' : size === 'lg' ? 'w-40 h-44 md:w-44 md:h-48' : 'w-28 h-32';
 
   const activeMessage = thinking
-    ? 'Analyzing campus labs...'
+    ? 'Checking campus labs...'
     : customGreeting || GREETINGS[greetingIndex];
 
   return (
@@ -103,8 +108,10 @@ export const LabBotMascot: React.FC<LabBotMascotProps> = ({
             className="mb-1.5 px-3.5 py-1.5 rounded-full bg-[#ffffff] text-[#1d1c15] text-xs font-semibold clay-button-soft flex items-center gap-1.5 whitespace-nowrap"
           >
             <motion.span
-              animate={thinking ? { scale: [1, 1.35, 1], opacity: [0.6, 1, 0.6] } : undefined}
-              transition={thinking ? { repeat: Infinity, duration: 0.9 } : undefined}
+              animate={
+                thinking && !reduced ? { scale: [1, 1.35, 1], opacity: [0.6, 1, 0.6] } : undefined
+              }
+              transition={thinking && !reduced ? { repeat: Infinity, duration: 0.9 } : undefined}
               className={`w-2 h-2 rounded-full ${thinking ? 'bg-[#2f6579]' : 'bg-[#29695a]'}`}
             />
             <span>{activeMessage}</span>
@@ -115,16 +122,16 @@ export const LabBotMascot: React.FC<LabBotMascotProps> = ({
       <motion.button
         type="button"
         onClick={triggerReaction}
-        onHoverStart={() => setIsWaving(true)}
+        onHoverStart={() => !reduced && setIsWaving(true)}
         onHoverEnd={() => setIsWaving(false)}
-        whileHover={{ scale: 1.05 }}
-        whileTap={{ scale: 0.94 }}
+        whileHover={reduced ? undefined : { scale: 1.05 }}
+        whileTap={reduced ? undefined : { scale: 0.94 }}
         aria-label="Interact with LabLink robot mascot"
         className={`${sizeClass} relative cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#29695a] rounded-3xl`}
       >
         <motion.div
-          animate={{ y: [0, -6, 0] }}
-          transition={{ repeat: Infinity, duration: 3.8, ease: 'easeInOut' }}
+          animate={reduced ? undefined : { y: [0, -6, 0] }}
+          transition={reduced ? undefined : { repeat: Infinity, duration: 3.8, ease: 'easeInOut' }}
           className="w-full h-full"
         >
           <svg viewBox="0 0 120 138" className="w-full h-full drop-shadow-md overflow-visible">

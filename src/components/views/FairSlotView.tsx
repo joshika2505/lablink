@@ -58,7 +58,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
   >([
     {
       role: 'bot',
-      text: 'Welcome to LabLink AI Assistant! Ask me to match equipment to your protocol, check safety certifications, or compare open time windows.',
+      text: 'Welcome to Smart Suggestions! Ask me which tools fit your project, what safety training is required, or when equipment is free.',
     },
   ]);
 
@@ -92,9 +92,9 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
       if (res.recommendedAlternativeId) {
         setSelectedAltMap((prev) => ({ ...prev, [activeCase.id]: res.recommendedAlternativeId }));
       }
-      setActionMsg('Gemini FairSlot re-evaluation complete. Faculty review required to apply.');
+      setActionMsg('Smart suggestion updated. Faculty approval is needed to apply.');
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'Gemini FairSlot analysis failed.');
+      setAiError(err instanceof Error ? err.message : 'Smart Booking check failed.');
     } finally {
       setAnalyzing(false);
     }
@@ -108,7 +108,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
     }
     if (!canApprove) {
       setAiError(
-        'Only Faculty or Administrators can finalize or override FairSlot resolutions. Switch persona in Sign In to review as Faculty.',
+        'Only Faculty or Admins can approve or change booking conflict plans.',
       );
       return;
     }
@@ -119,11 +119,11 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
       onConflictResolved(res.conflict, res.createdBooking);
       setActionMsg(
         mode === 'resolved_ai'
-          ? 'FairSlot recommendation approved by Faculty and calendar updated.'
-          : 'Faculty manual override applied and alternative slot confirmed.',
+          ? 'Smart Booking plan approved and calendar updated.'
+          : 'Faculty manual choice applied and new slot confirmed.',
       );
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'Could not apply resolution.');
+      setAiError(err instanceof Error ? err.message : 'Could not apply booking update.');
     } finally {
       setResolving(false);
     }
@@ -137,7 +137,10 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
     setChatHistory((prev) => [...prev, { role: 'user', text: prompt }]);
     setChatLoading(true);
     try {
-      const res = await api.aiAssistant(prompt);
+      const history = chatHistory
+        .slice(-6)
+        .map((m) => ({ role: (m.role === 'bot' ? 'assistant' : 'user') as 'assistant' | 'user', text: m.text }));
+      const res = await api.aiAssistant(prompt, history);
       setChatHistory((prev) => [
         ...prev,
         {
@@ -173,7 +176,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                 : 'text-[#3f4945] hover:text-[#1d1c15]'
             }`}
           >
-            FairSlot Conflict Arbitration ({conflicts.length})
+            Booking Conflicts ({conflicts.length})
           </button>
           <button
             type="button"
@@ -184,7 +187,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                 : 'text-[#3f4945] hover:text-[#1d1c15]'
             }`}
           >
-            LabBot Research Assistant
+            Smart Suggestions
           </button>
         </div>
 
@@ -226,10 +229,10 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                   </span>
                   <span>
                     {activeCase.status === 'open'
-                      ? 'Overlap Detected'
+                      ? 'Booking Conflict'
                       : activeCase.status === 'resolved_ai'
-                        ? 'Resolved (AI Plan)'
-                        : 'Faculty Overridden'}
+                        ? 'Resolved (Smart Plan)'
+                        : 'Faculty Chosen'}
                   </span>
                 </span>
                 <span className="text-xs font-semibold text-[#3f4945] tabular-nums">
@@ -242,8 +245,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                 {activeCase.equipmentName} — {activeCase.bayLabel}
               </h1>
               <p className="text-sm text-[#3f4945]">
-                Two overlapping reservations require FairSlot AI evaluation. Faculty retain final
-                approval and override authority.
+                Two overlapping requests need review. Faculty make the final approval decision.
               </p>
             </div>
 
@@ -257,7 +259,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                 <span className="material-symbols-outlined text-[17px] text-[#2f6579]">
                   psychology
                 </span>
-                <span>Re-Analyze with Gemini</span>
+                <span>Refresh Smart Plan</span>
               </TactileButton>
 
               <TactileButton
@@ -266,7 +268,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                 onClick={() => handleResolve('overridden_faculty')}
                 className="px-4 py-2.5 text-xs"
               >
-                Manual Override
+                Choose Manually
               </TactileButton>
 
               <TactileButton
@@ -279,8 +281,8 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                 <span className="material-symbols-outlined text-[18px]">auto_awesome</span>
                 <span>
                   {activeCase.status === 'open'
-                    ? 'Apply FairSlot Resolution'
-                    : 'Resolution Applied'}
+                    ? 'Approve Smart Plan'
+                    : 'Conflict Resolved'}
                 </span>
               </TactileButton>
             </div>
@@ -390,6 +392,26 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                       </span>
                     </div>
                   </div>
+
+                  {cand.scoreBreakdown && (
+                    <div className="flex flex-wrap gap-1.5 text-[10px] font-semibold tabular-nums">
+                      <span className="px-2.5 py-0.5 rounded-full bg-[#a8e8d5]/45 text-[#2b6a5b]">
+                        Deadline {cand.scoreBreakdown.deadlineScore}/28
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-[#b0e4fd]/55 text-[#32677c]">
+                        Fairness {cand.scoreBreakdown.fairnessScore}/22
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-[#f8f3e8] text-[#3f4945]">
+                        Safety {cand.scoreBreakdown.compatibilityScore}/18
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-[#f8f3e8] text-[#3f4945]">
+                        Fit {cand.scoreBreakdown.availabilityScore}/16
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-[#f8f3e8] text-[#3f4945]">
+                        Project {cand.scoreBreakdown.requirementScore}/16
+                      </span>
+                    </div>
+                  )}
                 </ClayTiltCard>
               ))}
             </div>
@@ -410,7 +432,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <span className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-[#ffffff] text-[#32677c] text-xs font-semibold shadow-sm">
                       <span className="material-symbols-outlined text-[16px]">smart_toy</span>
-                      <span>FairSlot AI Recommendation</span>
+                      <span>Smart Booking Plan</span>
                     </span>
 
                     <div className="flex items-center gap-1.5 bg-[#ffffff]/85 px-3.5 py-1 rounded-full">
@@ -485,7 +507,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-[#3f4945]">
-                  Equipment Availability Timeline
+                  Available Now Schedule
                 </span>
                 <h3 className="text-xl font-bold text-[#1d1c15]">
                   {activeCase.equipmentName} — {activeCase.date}
@@ -599,6 +621,31 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
             </div>
           </section>
         </div>
+      ) : activeTab === 'fairslot' ? (
+        <div className="bg-[#ffffff] rounded-[2rem] p-10 clay-card text-center flex flex-col items-center gap-4">
+          <LabBotMascot size="md" showSpeechBubble={false} />
+          <h2 className="text-2xl font-bold text-[#1d1c15]">No Active Booking Conflicts</h2>
+          <p className="text-sm text-[#3f4945] max-w-md">
+            When two students request overlapping time slots and choose Smart Booking arbitration,
+            the fair-allocation breakdown and conflict-free alternatives appear here.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <TactileButton
+              variant="primary"
+              onClick={() => onNavigate('discover')}
+              className="px-5 py-2.5 text-xs"
+            >
+              Find Equipment
+            </TactileButton>
+            <TactileButton
+              variant="soft"
+              onClick={() => setActiveTab('assistant')}
+              className="px-5 py-2.5 text-xs"
+            >
+              Ask Smart Suggestions
+            </TactileButton>
+          </div>
+        </div>
       ) : (
         /* LabBot AI Research Assistant Workspace */
         <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -614,9 +661,9 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
             </p>
             <div className="flex flex-col gap-2 w-full">
               {[
-                'Which microscope supports live-cell CO2 incubation?',
-                'What safety training is required for Haas Mini Mill 2?',
-                'Recommend equipment for thin-film perovskite characterization',
+                'Is the Arduino Starter Kit or ESP32 Board free today?',
+                'What safety training do I need for the CNC Machine?',
+                'Suggest tools for building a mobile robot',
               ].map((preset) => (
                 <button
                   key={preset}
@@ -681,7 +728,7 @@ export const FairSlotView: React.FC<FairSlotViewProps> = ({
                 loading={chatLoading}
                 className="px-5 py-2 text-xs"
               >
-                Ask Gemini AI
+                Ask LabBot
               </TactileButton>
             </form>
           </div>

@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AnimatePresence,
   motion,
@@ -6,6 +6,7 @@ import {
   useMotionValue,
   useSpring,
   useTransform,
+  type MotionValue,
 } from 'motion/react';
 
 export const SPRING_TACTILE = {
@@ -19,6 +20,127 @@ export const SPRING_GENTLE = {
   type: 'spring' as const,
   stiffness: 220,
   damping: 24,
+};
+
+export function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState<boolean>(() =>
+    typeof window !== 'undefined'
+      ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      : false,
+  );
+
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = (e: MediaQueryListEvent) => setReduced(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  return reduced;
+}
+
+/**
+ * Tracks pointer position normalized in [-0.5, 0.5] across a container
+ * using MotionValues + springs (zero React re-renders). Automatically
+ * disables on touch pointers and prefers-reduced-motion.
+ */
+export function useCursorParallax() {
+  const reduced = usePrefersReducedMotion();
+  const pointerX = useMotionValue(0);
+  const pointerY = useMotionValue(0);
+  const smoothX = useSpring(pointerX, { stiffness: 120, damping: 22, mass: 0.9 });
+  const smoothY = useSpring(pointerY, { stiffness: 120, damping: 22, mass: 0.9 });
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    if (reduced || e.pointerType === 'touch') return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    pointerX.set(Math.max(-0.5, Math.min(0.5, (e.clientX - rect.left) / rect.width - 0.5)));
+    pointerY.set(Math.max(-0.5, Math.min(0.5, (e.clientY - rect.top) / rect.height - 0.5)));
+  };
+
+  const handlePointerLeave = () => {
+    pointerX.set(0);
+    pointerY.set(0);
+  };
+
+  return {
+    smoothX,
+    smoothY,
+    reduced,
+    handlePointerMove,
+    handlePointerLeave,
+  };
+}
+
+interface CursorParallaxLayerProps {
+  smoothX: MotionValue<number>;
+  smoothY: MotionValue<number>;
+  depth?: number;
+  opposite?: boolean;
+  className?: string;
+  children: React.ReactNode;
+}
+
+export const CursorParallaxLayer: React.FC<CursorParallaxLayerProps> = ({
+  smoothX,
+  smoothY,
+  depth = 18,
+  opposite = true,
+  className = '',
+  children,
+}) => {
+  const dir = opposite ? -1 : 1;
+  const x = useTransform(smoothX, [-0.5, 0.5], [-depth * dir, depth * dir]);
+  const y = useTransform(smoothY, [-0.5, 0.5], [-depth * 0.8 * dir, depth * 0.8 * dir]);
+
+  return (
+    <motion.div style={{ x, y }} className={className}>
+      {children}
+    </motion.div>
+  );
+};
+
+interface FloatingClayObjectProps {
+  children: React.ReactNode;
+  className?: string;
+  amplitude?: number;
+  rotateRange?: number;
+  duration?: number;
+  delay?: number;
+}
+
+export const FloatingClayObject: React.FC<FloatingClayObjectProps> = ({
+  children,
+  className = '',
+  amplitude = 7,
+  rotateRange = 2.5,
+  duration = 5.4,
+  delay = 0,
+}) => {
+  const reduced = usePrefersReducedMotion();
+
+  if (reduced) {
+    return <div className={className}>{children}</div>;
+  }
+
+  return (
+    <motion.div
+      animate={{
+        y: [0, -amplitude, 0],
+        rotate: [-rotateRange, rotateRange, -rotateRange],
+      }}
+      transition={{
+        repeat: Infinity,
+        duration,
+        delay,
+        ease: 'easeInOut',
+      }}
+      className={className}
+    >
+      {children}
+    </motion.div>
+  );
 };
 
 interface ClayTiltCardProps {
@@ -36,6 +158,7 @@ export const ClayTiltCard: React.FC<ClayTiltCardProps> = ({
   tiltMax = 6,
   enableHoverLift = true,
 }) => {
+  const reduced = usePrefersReducedMotion();
   const cardRef = useRef<HTMLDivElement>(null);
   const mouseX = useMotionValue(0.5);
   const mouseY = useMotionValue(0.5);
@@ -48,10 +171,10 @@ export const ClayTiltCard: React.FC<ClayTiltCardProps> = ({
 
   const rotateY = useTransform(smoothX, [0, 1], [-tiltMax, tiltMax]);
   const rotateX = useTransform(smoothY, [0, 1], [tiltMax, -tiltMax]);
-  const glossBg = useMotionTemplate`radial-gradient(circle 180px at ${sheenX}% ${sheenY}%, rgba(255,255,255,0.62) 0%, rgba(255,255,255,0) 75%)`;
+  const glossBg = useMotionTemplate`radial-gradient(circle 190px at ${sheenX}% ${sheenY}%, rgba(255,255,255,0.68) 0%, rgba(255,255,255,0) 75%)`;
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'touch') return;
+    if (reduced || e.pointerType === 'touch') return;
     const el = cardRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -76,20 +199,26 @@ export const ClayTiltCard: React.FC<ClayTiltCardProps> = ({
       onClick={onClick}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
-      style={{
-        rotateX,
-        rotateY,
-        transformPerspective: 1000,
-        transformStyle: 'preserve-3d',
-      }}
-      whileHover={enableHoverLift ? { y: -5, transition: SPRING_TACTILE } : undefined}
-      className={`relative transition-shadow duration-300 ${className}`}
+      style={
+        reduced
+          ? undefined
+          : {
+              rotateX,
+              rotateY,
+              transformPerspective: 1000,
+              transformStyle: 'preserve-3d',
+            }
+      }
+      whileHover={enableHoverLift && !reduced ? { y: -5, transition: SPRING_TACTILE } : undefined}
+      className={`relative transition-shadow duration-300 hover:ring-2 hover:ring-[#a8e8d5]/65 ${className}`}
     >
-      <motion.div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0 rounded-[inherit] z-10"
-        style={{ background: glossBg, opacity: sheenOpacity }}
-      />
+      {!reduced && (
+        <motion.div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 rounded-[inherit] z-10"
+          style={{ background: glossBg, opacity: sheenOpacity }}
+        />
+      )}
       {children}
     </motion.div>
   );
@@ -112,25 +241,21 @@ export const TactileButton: React.FC<TactileButtonProps> = ({
   disabled,
   ...props
 }) => {
+  const reduced = usePrefersReducedMotion();
   const variantClasses: Record<NonNullable<TactileButtonProps['variant']>, string> = {
-    primary:
-      'bg-[#a8e8d5] text-[#2b6a5b] clay-button hover:brightness-[0.97]',
-    secondary:
-      'bg-[#b0e4fd] text-[#32677c] clay-button-soft hover:brightness-[0.97]',
-    soft:
-      'bg-[#ffffff] text-[#1d1c15] clay-button-soft hover:bg-[#f8f3e8]',
-    danger:
-      'bg-[#ffcfd9] text-[#84515e] clay-button-soft hover:brightness-[0.97]',
-    ghost:
-      'bg-[#f8f3e8] text-[#3f4945] hover:bg-[#ede8dd]',
+    primary: 'bg-[#a8e8d5] text-[#2b6a5b] clay-button hover:brightness-[0.97]',
+    secondary: 'bg-[#b0e4fd] text-[#32677c] clay-button-soft hover:brightness-[0.97]',
+    soft: 'bg-[#ffffff] text-[#1d1c15] clay-button-soft hover:bg-[#f8f3e8]',
+    danger: 'bg-[#ffcfd9] text-[#84515e] clay-button-soft hover:brightness-[0.97]',
+    ghost: 'bg-[#f8f3e8] text-[#3f4945] hover:bg-[#ede8dd]',
   };
 
   const isDisabled = Boolean(disabled || loading);
 
   return (
     <motion.button
-      whileHover={isDisabled ? undefined : { y: -1.5, scale: 1.015 }}
-      whileTap={isDisabled ? undefined : { scale: 0.96, y: 1.5 }}
+      whileHover={isDisabled || reduced ? undefined : { y: -1.5, scale: 1.015 }}
+      whileTap={isDisabled || reduced ? undefined : { scale: 0.96, y: 1.5 }}
       transition={SPRING_TACTILE}
       disabled={isDisabled}
       className={`inline-flex items-center justify-center gap-2 rounded-full font-semibold cursor-pointer select-none whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#29695a] disabled:opacity-55 disabled:cursor-not-allowed ${variantClasses[variant]} ${className}`}
@@ -168,6 +293,7 @@ export const MagneticElement: React.FC<MagneticElementProps> = ({
   className = '',
   strength = 0.18,
 }) => {
+  const reduced = usePrefersReducedMotion();
   const ref = useRef<HTMLDivElement>(null);
   const x = useMotionValue(0);
   const y = useMotionValue(0);
@@ -175,7 +301,7 @@ export const MagneticElement: React.FC<MagneticElementProps> = ({
   const springY = useSpring(y, { stiffness: 300, damping: 20 });
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'touch') return;
+    if (reduced || e.pointerType === 'touch') return;
     const el = ref.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -193,7 +319,7 @@ export const MagneticElement: React.FC<MagneticElementProps> = ({
   return (
     <motion.div
       ref={ref}
-      style={{ x: springX, y: springY }}
+      style={reduced ? undefined : { x: springX, y: springY }}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
       className={`inline-block ${className}`}
@@ -214,6 +340,11 @@ export const ScrollReveal: React.FC<ScrollRevealProps> = ({
   className = '',
   delay = 0,
 }) => {
+  const reduced = usePrefersReducedMotion();
+  if (reduced) {
+    return <div className={className}>{children}</div>;
+  }
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20, scale: 0.985 }}

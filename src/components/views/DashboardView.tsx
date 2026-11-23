@@ -35,13 +35,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [aiReply, setAiReply] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiSuggestedIds, setAiSuggestedIds] = useState<string[]>([]);
-  const [selectedCalDay, setSelectedCalDay] = useState(24);
+  const [selectedCalIso, setSelectedCalIso] = useState(() => new Date().toISOString().slice(0, 10));
+
+  const upcomingCalendarDays = Array.from({ length: 14 }, (_, idx) => {
+    const d = new Date();
+    d.setDate(d.getDate() + idx);
+    return {
+      iso: d.toISOString().slice(0, 10),
+      dayNum: d.getDate(),
+      monthLabel: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+    };
+  });
 
   const availableCount = equipment.filter((e) => e.status === 'available').length;
   const activeBookings = bookings.filter(
     (b) => (b.userId === user.id || user.role !== 'student') && b.status === 'confirmed',
   );
-  const pendingBookings = bookings.filter((b) => b.status === 'pending');
+  const pendingBookings = bookings.filter((b) =>
+    user.role === 'student' ? b.userId === user.id && b.status === 'pending' : b.status === 'pending',
+  );
 
   const handleAskAssistant = async (e?: React.FormEvent, overridePrompt?: string) => {
     e?.preventDefault();
@@ -52,10 +64,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     setAiError(null);
     try {
       const res = await api.aiAssistant(prompt);
-      setAiReply(`${res.answer} ${res.safetyNote ? `Safety note: ${res.safetyNote}` : ''}`);
+      setAiReply(`${res.answer} ${res.safetyNote ? `Safety tip: ${res.safetyNote}` : ''}`);
       setAiSuggestedIds(res.suggestedEquipmentIds || []);
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'Unable to contact LabLink AI.');
+      setAiError(err instanceof Error ? err.message : 'Unable to reach Smart Suggestions.');
     } finally {
       setAiThinking(false);
     }
@@ -85,12 +97,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
 
             <h1 className="text-3xl md:text-4xl font-bold text-[#1d1c15] leading-tight">
-              Hello, {firstName}! Ready to build something amazing?
+              Hello, {firstName}! Ready to book a lab?
             </h1>
 
             <p className="text-base text-[#3f4945]">
-              Your shared instruments, wet-lab benches, and AI protocol assistant are synced for
-              today’s experiments.
+              Find available tools, check your bookings, or get Smart Suggestions for your next
+              project.
             </p>
 
             <div className="flex flex-wrap items-center gap-3 pt-1">
@@ -100,7 +112,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 className="px-6 py-3 text-sm"
               >
                 <span className="material-symbols-outlined text-[20px]">explore</span>
-                <span>Discover Equipment</span>
+                <span>Find Equipment</span>
               </TactileButton>
               <TactileButton
                 variant="soft"
@@ -108,7 +120,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 className="px-6 py-3 text-sm"
               >
                 <span className="material-symbols-outlined text-[20px]">add_circle</span>
-                <span>Quick Reserve</span>
+                <span>Book Now</span>
               </TactileButton>
             </div>
           </div>
@@ -135,18 +147,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         >
           <div className="flex flex-col gap-1 min-w-0">
             <span className="text-xs font-semibold uppercase tracking-wider text-[#3f4945]">
-              Available Equipment
+              Available Now
             </span>
             <div className="flex items-baseline gap-2.5">
               <span className="text-4xl font-bold text-[#1d1c15] tabular-nums">
                 {availableCount}
               </span>
               <span className="px-2.5 py-0.5 rounded-full bg-[#a8e8d5] text-[#2b6a5b] text-[11px] font-semibold">
-                Online now
+                Ready today
               </span>
             </div>
             <span className="text-xs text-[#3f4945] truncate">
-              Across {equipment.length} total lab instruments
+              Out of {equipment.length} campus tools
             </span>
           </div>
           <div className="w-16 h-16 rounded-full bg-[#a8e8d5]/35 flex items-center justify-center flex-shrink-0 text-[#29695a]">
@@ -182,18 +194,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         >
           <div className="flex flex-col gap-1 min-w-0">
             <span className="text-xs font-semibold uppercase tracking-wider text-[#3f4945]">
-              Active Bookings
+              Confirmed Bookings
             </span>
             <div className="flex items-baseline gap-2.5">
               <span className="text-4xl font-bold text-[#1d1c15] tabular-nums">
                 {activeBookings.length}
               </span>
               <span className="px-2.5 py-0.5 rounded-full bg-[#b0e4fd] text-[#32677c] text-[11px] font-semibold">
-                Synced
+                Upcoming
               </span>
             </div>
             <span className="text-xs text-[#3f4945] truncate">
-              {activeBookings[0]?.equipmentName || 'No active slots'}
+              {activeBookings[0]?.equipmentName || 'No active bookings'}
             </span>
           </div>
           <div className="w-16 h-16 rounded-full bg-[#b0e4fd]/50 flex items-center justify-center flex-shrink-0 text-[#2f6579]">
@@ -208,7 +220,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         >
           <div className="flex flex-col gap-1 min-w-0">
             <span className="text-xs font-semibold uppercase tracking-wider text-[#3f4945]">
-              Pending Approvals
+              Waiting for Approval
             </span>
             <div className="flex items-baseline gap-2.5">
               <span className="text-4xl font-bold text-[#1d1c15] tabular-nums">
@@ -218,7 +230,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 In review
               </span>
             </div>
-            <span className="text-xs text-[#3f4945] truncate">Faculty sign-off requested</span>
+            <span className="text-xs text-[#3f4945] truncate">
+              {user.role === 'student' ? 'Waiting for faculty sign-off' : 'Requests to review'}
+            </span>
           </div>
           <div className="w-16 h-16 rounded-full bg-[#ffcfd9]/60 flex items-center justify-center flex-shrink-0 text-[#82505d]">
             <span className="material-symbols-outlined text-[28px]">verified</span>
@@ -229,15 +243,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       {/* Main 12-Col Bento Split */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-8 flex flex-col gap-8">
-          {/* My Workspace Pastel Cards */}
+          {/* My Projects Pastel Cards */}
           <ScrollReveal>
             <section className="flex flex-col gap-4">
               <div className="flex items-center justify-between">
                 <div>
                   <span className="text-xs font-semibold uppercase tracking-wider text-[#3f4945]">
-                    01. Active Research
+                    01. Project Access
                   </span>
-                  <h2 className="text-2xl font-bold text-[#1d1c15]">My Workspace</h2>
+                  <h2 className="text-2xl font-bold text-[#1d1c15]">My Projects</h2>
                 </div>
                 <TactileButton
                   variant="soft"
@@ -250,51 +264,69 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {projects.slice(0, 3).map((proj) => {
-                  const bgClass =
-                    proj.tone === 'mint'
-                      ? 'bg-[#a8e8d5] text-[#2b6a5b]'
-                      : proj.tone === 'blue'
-                        ? 'bg-[#b0e4fd] text-[#32677c]'
-                        : 'bg-[#ffcfd9] text-[#84515e]';
-                  const barClass =
-                    proj.tone === 'mint'
-                      ? 'bg-[#29695a]'
-                      : proj.tone === 'blue'
-                        ? 'bg-[#2f6579]'
-                        : 'bg-[#82505d]';
-                  return (
-                    <ClayTiltCard
-                      key={proj.id}
-                      tiltMax={5}
+                {projects.length === 0 ? (
+                  <div className="md:col-span-3 bg-[#ffffff] rounded-[2rem] p-6 clay-card flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <p className="text-base font-bold text-[#1d1c15]">No projects yet</p>
+                      <p className="text-xs text-[#3f4945]">
+                        Create a project to match instruments and request lab access.
+                      </p>
+                    </div>
+                    <TactileButton
+                      variant="primary"
                       onClick={() => onNavigate('projects')}
-                      className={`${bgClass} rounded-[2rem] p-6 clay-card flex flex-col justify-between gap-6 cursor-pointer`}
+                      className="px-5 py-2 text-xs"
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="px-2.5 py-0.5 rounded-full bg-[#ffffff]/75 text-[11px] font-semibold">
-                          {proj.category}
-                        </span>
-                        <span className="material-symbols-outlined text-[20px]">{proj.icon}</span>
-                      </div>
-                      <div className="flex flex-col gap-1">
-                        <h3 className="text-lg font-semibold">{proj.title}</h3>
-                        <p className="text-xs opacity-85 line-clamp-2">{proj.description}</p>
-                      </div>
-                      <div className="flex flex-col gap-1.5">
-                        <div className="flex items-center justify-between text-[11px] font-semibold tabular-nums">
-                          <span>Progress</span>
-                          <span>{proj.progress}%</span>
+                      Add Project
+                    </TactileButton>
+                  </div>
+                ) : (
+                  projects.slice(0, 3).map((proj) => {
+                    const bgClass =
+                      proj.tone === 'mint'
+                        ? 'bg-[#a8e8d5] text-[#2b6a5b]'
+                        : proj.tone === 'blue'
+                          ? 'bg-[#b0e4fd] text-[#32677c]'
+                          : 'bg-[#ffcfd9] text-[#84515e]';
+                    const barClass =
+                      proj.tone === 'mint'
+                        ? 'bg-[#29695a]'
+                        : proj.tone === 'blue'
+                          ? 'bg-[#2f6579]'
+                          : 'bg-[#82505d]';
+                    return (
+                      <ClayTiltCard
+                        key={proj.id}
+                        tiltMax={5}
+                        onClick={() => onNavigate('projects')}
+                        className={`${bgClass} rounded-[2rem] p-6 clay-card flex flex-col justify-between gap-6 cursor-pointer`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="px-2.5 py-0.5 rounded-full bg-[#ffffff]/75 text-[11px] font-semibold">
+                            {proj.category}
+                          </span>
+                          <span className="material-symbols-outlined text-[20px]">{proj.icon}</span>
                         </div>
-                        <div className="w-full h-2 rounded-full bg-[#ffffff]/60 overflow-hidden">
-                          <div
-                            className={`h-full rounded-full ${barClass}`}
-                            style={{ width: `${proj.progress}%` }}
-                          />
+                        <div className="flex flex-col gap-1">
+                          <h3 className="text-lg font-semibold">{proj.title}</h3>
+                          <p className="text-xs opacity-85 line-clamp-2">{proj.description}</p>
                         </div>
-                      </div>
-                    </ClayTiltCard>
-                  );
-                })}
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex items-center justify-between text-[11px] font-semibold tabular-nums">
+                            <span>Progress</span>
+                            <span>{proj.progress}%</span>
+                          </div>
+                          <div className="w-full h-2 rounded-full bg-[#ffffff]/60 overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${barClass}`}
+                              style={{ width: `${proj.progress}%` }}
+                            />
+                          </div>
+                        </div>
+                      </ClayTiltCard>
+                    );
+                  })
+                )}
               </div>
             </section>
           </ScrollReveal>
@@ -305,23 +337,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <div className="flex items-center justify-between">
                 <div>
                   <span className="text-xs font-semibold uppercase tracking-wider text-[#3f4945]">
-                    02. Lab Log
+                    02. Recent Activity
                   </span>
-                  <h2 className="text-2xl font-bold text-[#1d1c15]">Recent Activity</h2>
+                  <h2 className="text-2xl font-bold text-[#1d1c15]">Latest Bookings</h2>
                 </div>
-                <span className="px-3.5 py-1 rounded-full bg-[#ffffff] text-[11px] font-semibold text-[#3f4945] clay-well">
-                  Live
-                </span>
+                <TactileButton
+                  variant="soft"
+                  onClick={() => onNavigate('my-reservations')}
+                  className="px-3.5 py-1 text-[11px]"
+                >
+                  Manage Bookings
+                </TactileButton>
               </div>
 
               <div className="flex flex-col gap-3">
-                {bookings.slice(0, 4).map((bk) => {
+                {bookings.length === 0 ? (
+                  <p className="text-xs text-[#3f4945] bg-[#ffffff] rounded-2xl p-4">
+                    No bookings recorded yet. Pick an instrument in Find Equipment to reserve a slot.
+                  </p>
+                ) : (
+                  bookings.slice(0, 4).map((bk) => {
                   const iconBg =
                     bk.status === 'confirmed'
                       ? 'bg-[#a8e8d5] text-[#2b6a5b]'
                       : bk.status === 'pending'
                         ? 'bg-[#f8de91] text-[#4a3800]'
                         : 'bg-[#ffcfd9] text-[#84515e]';
+                  const statusText =
+                    bk.status === 'pending'
+                      ? 'Waiting for Approval'
+                      : bk.status === 'alternative_suggested'
+                        ? 'New Time Suggested'
+                        : bk.status;
                   return (
                     <div
                       key={bk.id}
@@ -342,7 +389,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-sm font-semibold text-[#1d1c15] truncate">
-                            {bk.equipmentName} — {bk.status.replace('_', ' ')}
+                            {bk.equipmentName} — {statusText}
                           </p>
                           <span className="text-xs text-[#3f4945] flex-shrink-0 tabular-nums">
                             {bk.date}
@@ -356,13 +403,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       </div>
                     </div>
                   );
-                })}
+                })
+                )}
               </div>
             </section>
           </ScrollReveal>
         </div>
 
-        {/* Right Column: AI Lab Assistant & Calendar */}
+        {/* Right Column: Smart Suggestions & Calendar */}
         <div className="lg:col-span-4 flex flex-col gap-8">
           <section className="bg-[#bce9ff] text-[#001f29] rounded-[2rem] p-6 clay-card flex flex-col gap-4">
             <div className="flex items-center gap-3">
@@ -371,19 +419,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
               <div>
                 <span className="text-[11px] font-semibold uppercase tracking-wider opacity-75">
-                  AI Lab Assistant
+                  Smart Suggestions
                 </span>
                 <h2 className="text-lg font-semibold leading-snug">
-                  What are you planning to build today?
+                  What are you building today?
                 </h2>
               </div>
             </div>
 
             <div className="flex flex-wrap gap-1.5">
               {[
-                'Find an imaging microscope today',
-                'Confocal safety requirements',
-                'Suggest equipment for CRISPR',
+                'Which 3D printer is free today?',
+                'Safety training for CNC Machine',
+                'Suggest tools for Arduino & PCB',
               ].map((chip) => (
                 <button
                   key={chip}
@@ -404,7 +452,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 type="text"
                 value={aiInput}
                 onChange={(e) => setAiInput(e.target.value)}
-                placeholder="Ask LabLink AI..."
+                placeholder="Ask LabBot..."
                 className="flex-1 min-w-0 bg-transparent text-sm text-[#1d1c15] placeholder:text-[#3f4945] focus:outline-none"
               />
               <TactileButton
@@ -412,7 +460,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 variant="primary"
                 loading={aiThinking}
                 className="w-9 h-9 p-0"
-                aria-label="Send AI prompt"
+                aria-label="Send question"
               >
                 <span className="material-symbols-outlined text-[18px]">arrow_upward</span>
               </TactileButton>
@@ -439,7 +487,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           onClick={() => onNavigate('equipment-detail', eq.id)}
                           className="px-2.5 py-1 rounded-full bg-[#a8e8d5] text-[#2b6a5b] text-[11px] font-semibold hover:brightness-95 cursor-pointer"
                         >
-                          {eq.name} →
+                          View Details: {eq.name} →
                         </button>
                       );
                     })}
@@ -458,28 +506,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </span>
                 <h2 className="text-xl font-bold text-[#1d1c15]">Upcoming Bookings</h2>
               </div>
-              <span className="text-xs font-semibold text-[#29695a]">Nov 2026</span>
-            </div>
-
-            <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-semibold text-[#3f4945]">
-              <span>M</span>
-              <span>T</span>
-              <span>W</span>
-              <span>T</span>
-              <span>F</span>
-              <span>S</span>
-              <span>S</span>
+              <span className="text-xs font-semibold text-[#29695a]">
+                {upcomingCalendarDays[0]?.monthLabel}
+              </span>
             </div>
 
             <div className="grid grid-cols-7 gap-1 text-center text-xs font-semibold tabular-nums">
-              {[23, 24, 25, 26, 27, 28, 29, 30, 1, 2, 3, 4, 5, 6].map((day, idx) => {
-                const isSelected = day === selectedCalDay && idx < 8;
-                const hasBooking = day === 24 || day === 25;
+              {upcomingCalendarDays.map((day) => {
+                const isSelected = day.iso === selectedCalIso;
+                const hasBooking = bookings.some(
+                  (b) => b.date === day.iso && (b.status === 'confirmed' || b.status === 'pending'),
+                );
                 return (
                   <button
-                    key={`${day}-${idx}`}
+                    key={day.iso}
                     type="button"
-                    onClick={() => setSelectedCalDay(day)}
+                    onClick={() => setSelectedCalIso(day.iso)}
                     className={`h-8 rounded-full transition-colors cursor-pointer ${
                       isSelected
                         ? 'bg-[#a8e8d5] text-[#2b6a5b] shadow-sm'
@@ -488,7 +530,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           : 'hover:bg-[#f8f3e8] text-[#1d1c15]'
                     }`}
                   >
-                    {day}
+                    {day.dayNum}
                   </button>
                 );
               })}

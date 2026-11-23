@@ -1,61 +1,61 @@
 import React, { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import type { Equipment, EquipmentCategory } from '../../types/lablink';
+import {
+  EQUIPMENT_CATEGORIES,
+  type Equipment,
+  type EquipmentCategory,
+} from '../../types/lablink';
 import { api } from '../../lib/api';
-import { ClayEquipmentArtwork } from '../clay/ClayEquipmentArtwork';
-import { ClayTiltCard, SPRING_TACTILE, TactileButton } from '../motion/MotionPrimitives';
+import { CategoryClayIllustration, ClayEquipmentArtwork } from '../clay/ClayEquipmentArtwork';
+import {
+  ClayTiltCard,
+  FloatingClayObject,
+  SPRING_TACTILE,
+  TactileButton,
+  usePrefersReducedMotion,
+} from '../motion/MotionPrimitives';
 
 interface DiscoverViewProps {
   equipment: Equipment[];
   onSelectEquipment: (equipmentId: string) => void;
 }
 
-const CATEGORIES: Array<{
-  label: 'All' | EquipmentCategory;
-  icon: string;
-  chipBg: string;
-  iconColor: string;
+const CATEGORY_CARDS: Array<{
+  id: 'All' | EquipmentCategory;
+  subtitle: string;
+  toneBg: string;
 }> = [
-  { label: 'All', icon: 'apps', chipBg: 'bg-[#ffffff]', iconColor: 'text-[#29695a]' },
+  { id: 'All', subtitle: 'Browse every campus tool', toneBg: 'bg-[#f8f3e8]' },
   {
-    label: 'Robotics',
-    icon: 'precision_manufacturing',
-    chipBg: 'bg-[#b0e4fd]',
-    iconColor: 'text-[#32677c]',
+    id: 'Electronics & Circuits',
+    subtitle: 'Microcontrollers & signals',
+    toneBg: 'bg-[#e7f8f3]',
   },
   {
-    label: 'Electronics',
-    icon: 'memory',
-    chipBg: 'bg-[#ffcfd9]',
-    iconColor: 'text-[#84515e]',
+    id: '3D Printing & Making',
+    subtitle: 'Printers, lasers & routers',
+    toneBg: 'bg-[#fff3d1]',
+  },
+  { id: 'Robotics', subtitle: 'Arms, rovers & sensors', toneBg: 'bg-[#dff3fd]' },
+  {
+    id: 'Computers & Software',
+    subtitle: 'CAD, AI compute & VR',
+    toneBg: 'bg-[#ede6fb]',
   },
   {
-    label: 'Manufacturing',
-    icon: 'build',
-    chipBg: 'bg-[#afefdc]',
-    iconColor: 'text-[#075043]',
+    id: 'Testing & Measurement',
+    subtitle: 'Meters, calipers & power',
+    toneBg: 'bg-[#ffe8ee]',
   },
   {
-    label: 'Research',
-    icon: 'biotech',
-    chipBg: 'bg-[#bce9ff]',
-    iconColor: 'text-[#114d61]',
-  },
-  {
-    label: 'Computing',
-    icon: 'developer_board',
-    chipBg: 'bg-[#ffd9e0]',
-    iconColor: 'text-[#673946]',
-  },
-  {
-    label: 'Fabrication',
-    icon: 'layers',
-    chipBg: 'bg-[#a8e8d5]',
-    iconColor: 'text-[#2b6a5b]',
+    id: 'Mechanical Workshop',
+    subtitle: 'Lathes, mills & drills',
+    toneBg: 'bg-[#e7f8f3]',
   },
 ];
 
 export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectEquipment }) => {
+  const reduced = usePrefersReducedMotion();
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<'All' | EquipmentCategory>('All');
   const [onlyAvailable, setOnlyAvailable] = useState(false);
@@ -68,6 +68,17 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
     Record<string, { score: number; reason: string; slotHint: string }>
   >({});
 
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = { All: equipment.length };
+    for (const cat of EQUIPMENT_CATEGORIES) {
+      counts[cat] = 0;
+    }
+    for (const item of equipment) {
+      counts[item.category] = (counts[item.category] || 0) + 1;
+    }
+    return counts;
+  }, [equipment]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const list = equipment.filter((item) => {
@@ -76,7 +87,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
       const queryOk =
         !q ||
         Boolean(aiScores[item.id]) ||
-        `${item.name} ${item.departmentName} ${item.specsPreview} ${item.category} ${item.locationLabel}`
+        `${item.name} ${item.shortPurpose} ${item.description} ${item.departmentName} ${item.specsPreview} ${item.category} ${item.locationLabel}`
           .toLowerCase()
           .includes(q);
       return catOk && availOk && queryOk;
@@ -91,7 +102,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
   const handleAiMatch = async () => {
     const query = search.trim();
     if (!query) {
-      setAiError('Type what you need for your experiment (e.g., "live-cell fluorescence imaging").');
+      setAiError('Type what you need (e.g., "Arduino project", "3D Printer", or "CNC").');
       return;
     }
     setAiLoading(true);
@@ -109,7 +120,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
       }
       setAiScores(map);
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'AI equipment matching failed.');
+      setAiError(err instanceof Error ? err.message : 'Smart suggestions failed.');
     } finally {
       setAiLoading(false);
     }
@@ -128,10 +139,15 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
       <section className="pt-4 pb-6">
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
           <div>
-            <span className="text-xs font-semibold uppercase tracking-wider text-[#29695a]">
-              01. Campus Marketplace
-            </span>
-            <h1 className="text-3xl font-bold text-[#1d1c15] mt-1">Equipment Discovery</h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wider text-[#29695a]">
+                01. Campus Equipment
+              </span>
+              <span className="px-2.5 py-0.5 rounded-full bg-[#f8de91] text-[#4a3800] text-[10px] font-semibold">
+                Sample Lab Data
+              </span>
+            </div>
+            <h1 className="text-3xl font-bold text-[#1d1c15] mt-1">Find Equipment</h1>
           </div>
 
           <TactileButton
@@ -153,7 +169,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
             e.preventDefault();
             handleAiMatch();
           }}
-          className="relative w-full bg-[#ffffff] rounded-full p-2 clay-card flex items-center gap-2"
+          className="relative w-full bg-[#ffffff] rounded-full p-2 clay-card flex items-center gap-2 focus-within:ring-2 focus-within:ring-[#a8e8d5] transition-shadow"
         >
           <div className="w-11 h-11 rounded-full bg-[#a8e8d5] flex items-center justify-center shrink-0 text-[#2b6a5b]">
             <span className="material-symbols-outlined text-[22px]">search</span>
@@ -168,7 +184,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
                 setAiSummary(null);
               }
             }}
-            placeholder="What do you need for your next project? (e.g., thin-film XRD or 6-axis robot)"
+            placeholder="Search tools like Arduino, 3D Printer, CNC, Multimeter, VR Headset..."
             className="w-full bg-transparent text-sm md:text-base text-[#1d1c15] placeholder:text-[#707975] focus:outline-none px-2 min-w-0"
           />
           {search && (
@@ -188,7 +204,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
             className="px-5 py-2.5 text-sm"
           >
             <span className="material-symbols-outlined text-[18px]">auto_awesome</span>
-            <span>AI Match</span>
+            <span>Smart Match</span>
           </TactileButton>
         </form>
 
@@ -215,50 +231,78 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
               onClick={clearAiAndSearch}
               className="underline font-semibold shrink-0 cursor-pointer"
             >
-              Reset AI Match
+              Reset
             </button>
           </motion.div>
         )}
       </section>
 
-      {/* Category Filter Pills */}
-      <section className="pb-8">
-        <div className="flex flex-wrap items-center gap-2.5">
-          {CATEGORIES.map((cat) => {
-            const active = activeCategory === cat.label;
+      {/* Interactive Clay Category Cards */}
+      <section className="pb-8" aria-label="Equipment categories">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
+          {CATEGORY_CARDS.map((cat, idx) => {
+            const active = activeCategory === cat.id;
+            const count = categoryCounts[cat.id] ?? 0;
             return (
               <motion.button
-                key={cat.label}
+                key={cat.id}
                 type="button"
-                whileHover={{ y: -1.5 }}
-                whileTap={{ scale: 0.96 }}
+                whileHover={reduced ? undefined : { y: -3, scale: 1.015 }}
+                whileTap={reduced ? undefined : { scale: 0.96 }}
                 transition={SPRING_TACTILE}
-                onClick={() => setActiveCategory(cat.label)}
-                className={`flex items-center gap-2.5 px-4 py-2 rounded-full text-sm font-semibold transition-colors cursor-pointer ${
+                onClick={() => setActiveCategory(cat.id)}
+                className={`relative rounded-[1.5rem] p-3 text-left flex flex-col gap-2.5 cursor-pointer transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#29695a] ${
                   active
-                    ? 'bg-[#a8e8d5] text-[#2b6a5b] clay-button'
-                    : 'bg-[#ffffff] text-[#1d1c15] clay-card hover:bg-[#f8f3e8]'
+                    ? 'bg-[#a8e8d5] text-[#1c4b40] ring-2 ring-[#29695a] clay-button'
+                    : 'bg-[#ffffff] text-[#1d1c15] clay-card hover:bg-[#fef9ee]'
                 }`}
               >
-                <span className={`w-7 h-7 rounded-full flex items-center justify-center ${cat.chipBg}`}>
-                  <span className={`material-symbols-outlined text-[16px] ${cat.iconColor}`}>
-                    {cat.icon}
+                <div className="flex items-center justify-between gap-2 w-full">
+                  <motion.div
+                    animate={active && !reduced ? { rotate: [0, -6, 6, 0], scale: [1, 1.08, 1] } : undefined}
+                    transition={{ duration: 0.45 }}
+                    className={`w-12 h-11 rounded-2xl overflow-hidden shrink-0 ${cat.toneBg}`}
+                  >
+                    <FloatingClayObject amplitude={3} rotateRange={1.2} duration={4.5 + idx * 0.3}>
+                      <CategoryClayIllustration category={cat.id} />
+                    </FloatingClayObject>
+                  </motion.div>
+
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[11px] font-bold tabular-nums ${
+                      active ? 'bg-[#ffffff] text-[#29695a]' : 'bg-[#f8f3e8] text-[#3f4945]'
+                    }`}
+                  >
+                    {count}
                   </span>
-                </span>
-                <span>{cat.label}</span>
+                </div>
+
+                <div className="min-w-0">
+                  <p className="text-xs font-bold leading-snug line-clamp-2">{cat.id}</p>
+                  <p
+                    className={`text-[10px] mt-0.5 line-clamp-1 ${
+                      active ? 'text-[#2b6a5b]' : 'text-[#707975]'
+                    }`}
+                  >
+                    {cat.subtitle}
+                  </p>
+                </div>
               </motion.button>
             );
           })}
         </div>
       </section>
 
-      {/* Results Grid with Staggered Animations */}
+      {/* Results Grid with Smooth Transitions */}
       <section>
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <p className="text-xs font-semibold text-[#3f4945] tabular-nums">
-            Showing {filtered.length} instrument{filtered.length === 1 ? '' : 's'}
+            Showing {filtered.length} tool{filtered.length === 1 ? '' : 's'}
+            {activeCategory !== 'All' ? ` in ${activeCategory}` : ''}
           </p>
-          <span className="text-xs text-[#707975]">Updated live</span>
+          <span className="text-xs text-[#707975]">
+            Sample schedules shown · Ready to connect to Supabase
+          </span>
         </div>
 
         {filtered.length > 0 ? (
@@ -273,18 +317,20 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
                   <motion.div
                     key={item.id}
                     layout
-                    initial={{ opacity: 0, y: 18, scale: 0.96 }}
+                    initial={reduced ? { opacity: 1 } : { opacity: 0, y: 16, scale: 0.96 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.94 }}
-                    transition={{ ...SPRING_TACTILE, delay: Math.min(idx * 0.04, 0.24) }}
+                    exit={reduced ? { opacity: 0 } : { opacity: 0, scale: 0.94 }}
+                    transition={{ ...SPRING_TACTILE, delay: Math.min(idx * 0.035, 0.21) }}
                   >
                     <ClayTiltCard
                       onClick={() => onSelectEquipment(item.id)}
-                      className="bg-[#ffffff] rounded-[2rem] p-6 clay-card flex flex-col justify-between gap-4 h-full cursor-pointer"
+                      className="bg-[#ffffff] rounded-[2rem] p-6 clay-card flex flex-col justify-between gap-4 h-full cursor-pointer group"
                     >
                       <div>
                         <div className="relative h-44 w-full rounded-2xl overflow-hidden mb-4">
-                          <ClayEquipmentArtwork theme={item.clayTheme} />
+                          <div className="w-full h-full transition-transform duration-300 group-hover:scale-[1.04]">
+                            <ClayEquipmentArtwork theme={item.clayTheme} />
+                          </div>
                           <span
                             className={`absolute top-3 right-3 px-3 py-1 rounded-full text-[11px] font-semibold shadow-sm flex items-center gap-1.5 ${
                               item.status === 'available'
@@ -309,11 +355,15 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
                                 ? 'Maintenance'
                                 : 'In Use'}
                           </span>
-                          {aiMatch && (
+                          {aiMatch ? (
                             <span className="absolute top-3 left-3 px-3 py-1 rounded-full bg-[#ffffff]/95 text-[#29695a] text-[11px] font-bold shadow-sm tabular-nums">
-                              {aiMatch.score}% AI Match
+                              {aiMatch.score}% Match
                             </span>
-                          )}
+                          ) : item.isSampleData !== false ? (
+                            <span className="absolute bottom-2.5 left-2.5 px-2.5 py-0.5 rounded-full bg-[#ffffff]/90 text-[#3f4945] text-[10px] font-semibold shadow-sm">
+                              Sample Lab Data
+                            </span>
+                          ) : null}
                         </div>
 
                         <div className="flex items-center justify-between gap-2 text-xs mb-1.5">
@@ -323,7 +373,11 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
 
                         <h3 className="text-lg font-semibold text-[#1d1c15] mb-1">{item.name}</h3>
 
-                        <div className="flex items-center gap-1 text-xs text-[#3f4945] mb-3">
+                        <p className="text-xs text-[#3f4945] line-clamp-1 mb-2.5">
+                          {item.shortPurpose || item.description}
+                        </p>
+
+                        <div className="flex items-center gap-1 text-xs text-[#707975] mb-3">
                           <span className="material-symbols-outlined text-[16px] text-[#29695a]">
                             location_on
                           </span>
@@ -332,7 +386,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
 
                         <div className="bg-[#f8f3e8] rounded-2xl p-3 clay-well">
                           <p className="text-[11px] font-semibold text-[#3f4945] mb-0.5">
-                            {aiMatch ? 'AI Match Rationale' : 'Specifications Preview'}
+                            {aiMatch ? 'Why It Fits' : 'Quick Specs'}
                           </p>
                           <p className="text-xs text-[#1d1c15]">
                             {aiMatch ? aiMatch.reason : item.specsPreview}
@@ -341,21 +395,25 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
                       </div>
 
                       <div className="flex items-center justify-between gap-3 pt-1">
-                        <div>
-                          <span className="block text-[11px] text-[#707975]">Next Slot</span>
-                          <span className="text-xs font-semibold text-[#1d1c15]">
-                            {aiMatch ? aiMatch.slotHint : item.nextSlotLabel}
-                          </span>
+                        <div className="min-w-0">
+                          {item.nextSlotLabel && (
+                            <>
+                              <span className="block text-[11px] text-[#707975]">Next Slot</span>
+                              <span className="text-xs font-semibold text-[#1d1c15] truncate block">
+                                {aiMatch ? aiMatch.slotHint : item.nextSlotLabel}
+                              </span>
+                            </>
+                          )}
                         </div>
                         <TactileButton
-                          variant="primary"
+                          variant={item.status === 'available' ? 'primary' : 'soft'}
                           onClick={(e) => {
                             e.stopPropagation();
                             onSelectEquipment(item.id);
                           }}
                           className="px-5 py-2 text-xs"
                         >
-                          View Details
+                          {item.status === 'available' ? 'Book Now' : 'View Details'}
                         </TactileButton>
                       </div>
                     </ClayTiltCard>
@@ -365,15 +423,20 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
             </AnimatePresence>
           </motion.div>
         ) : (
-          <div className="flex flex-col items-center justify-center py-14 text-center bg-[#f8f3e8] rounded-[2rem] clay-well">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={SPRING_TACTILE}
+            className="flex flex-col items-center justify-center py-14 text-center bg-[#f8f3e8] rounded-[2rem] clay-well px-4"
+          >
             <div className="w-16 h-16 rounded-full bg-[#a8e8d5] flex items-center justify-center mb-4 text-[#2b6a5b]">
               <span className="material-symbols-outlined text-[28px]">search_off</span>
             </div>
             <h3 className="text-lg font-semibold text-[#1d1c15] mb-1">
-              No matching equipment found
+              No matching tools found
             </h3>
             <p className="text-sm text-[#3f4945] mb-4 max-w-md">
-              Try adjusting your search terms or clearing the active category filter.
+              Try a simpler tool name like Arduino, 3D Printer, or Robot, or reset your filters.
             </p>
             <TactileButton
               variant="primary"
@@ -386,7 +449,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({ equipment, onSelectE
             >
               Reset Filters
             </TactileButton>
-          </div>
+          </motion.div>
         )}
       </section>
     </div>
